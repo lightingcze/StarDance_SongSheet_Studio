@@ -58,3 +58,7 @@ Tempo se hledá z krátké RMS obálky. Nástrojové vrstvy se odhadují z frekv
 ## Licence písem
 
 Vykreslování českého textu používá DejaVu Sans. Licenční text je v `assets/fonts/DEJAVU_FONT_LICENSE.txt`.
+
+## Webová verze
+
+Otevřete Start_Web_Editor.cmd nebo postupujte podle návodu v web/README.md. Webový editor běží místně v prohlížeči; audio a obrazové reference zůstávají na vašem zařízení.

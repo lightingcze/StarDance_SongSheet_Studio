@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#16222a">
+  <title>StarDance SongSheet Studio · Web</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="StarDance SongSheet Studio">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span><strong>StarDance</strong><small>SONGSHEET STUDIO</small></span>
+      </a>
+      <div class="topbar-status" id="audioStatus" role="status" aria-live="polite">Načtěte audio pro waveform a analýzu.</div>
+      <div class="topbar-actions">
+        <button class="button ghost" id="newProjectButton" type="button">Nový</button>
+        <button class="button ghost" id="openProjectButton" type="button">Otevřít</button>
+        <button class="button secondary" id="saveProjectButton" type="button">Uložit projekt</button>
+        <button class="button primary" id="loadAudioButton" type="button">Načíst audio</button>
+        <button class="button ghost" id="addReferenceButton" type="button">+ Reference</button>
+        <span class="toolbar-divider" aria-hidden="true"></span>
+        <button class="button ghost" id="exportPngButton" type="button">Export PNG</button>
+        <button class="button dark" id="exportPdfButton" type="button">Export PDF</button>
+      </div>
+      <input id="audioInput" type="file" accept="audio/wav,audio/mpeg,audio/flac,audio/mp4,audio/aac,audio/ogg,audio/aiff,.wav,.mp3,.flac,.m4a,.aac,.ogg,.aiff,.aif" hidden>
+      <input id="referenceInput" type="file" accept="image/*" multiple hidden>
+      <input id="projectInput" type="file" accept="application/json,.json" hidden>
+    </header>
+
+    <main class="workspace-grid">
+      <aside class="editor-panel" aria-label="Editor skladby">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">EDITOR SKLADBY</span>
+            <h1>Pracovní podklad</h1>
+          </div>
+          <span class="local-badge"><span></span> lokální</span>
+        </div>
+        <nav class="editor-tabs" aria-label="Sekce editoru">
+          <button class="editor-tab active" data-editor-tab="song" type="button">Skladba</button>
+          <button class="editor-tab" data-editor-tab="music" type="button">Hudební mapa</button>
+          <button class="editor-tab" data-editor-tab="production" type="button">Produkce</button>
+          <button class="editor-tab" data-editor-tab="ld" type="button">Návrhy LD</button>
+          <button class="editor-tab" data-editor-tab="layout" type="button">Vzhled</button>
+        </nav>
+
+        <section class="editor-content active" data-editor-panel="song">
+          <div class="section-intro">
+            <span class="eyebrow">ZÁKLADNÍ ÚDAJE</span>
+            <p>Údaje se průběžně promítají do tiskového náhledu.</p>
+          </div>
+          <label class="field"><span>Název skladby</span><input data-meta="title" placeholder="Název čísla"></label>
+          <div class="field-row">
+            <label class="field"><span>Díl</span><input data-meta="episode" placeholder="např. 4"></label>
+            <label class="field"><span>Tanec</span><input data-meta="dance" placeholder="např. tango"></label>
+          </div>
+          <label class="field"><span>Interpret</span><input data-meta="artist" placeholder="Interpret / skupina"></label>
+          <label class="field"><span>Účinkující</span><input data-meta="performer" placeholder="Jména účinkujících"></label>
+          <div class="field-row">
+            <label class="field"><span>Délka · HH:MM:SS:FF</span><input id="durationField" placeholder="00:03:24:00" inputmode="numeric"></label>
+            <label class="field"><span>Tempo BPM</span><input id="bpmField" placeholder="odhad"></label>
+          </div>
+          <div class="info-card"><span class="info-icon">i</span><p>BPM, takt a první doba jsou automatické odhady. Vždy je ověřte poslechem.</p></div>
+          <div class="privacy-note"><span class="privacy-dot"></span> Audio se zpracovává pouze v tomto prohlížeči.</div>
+        </section>
+
+        <section class="editor-content" data-editor-panel="music">
+          <div class="section-intro">
+            <span class="eyebrow">NÁVRHY Z ANALÝZY</span>
+            <h2>Hudební mapa</h2>
+            <p>Kandidátní akcenty a energetická okna; nejde o ověřené hudební fráze ani GO cue.</p>
+          </div>
+          <div class="analysis-card">
+            <div class="analysis-card-head"><span>Tempo</span><span class="confidence-chip" id="confidenceValue">Neurčeno</span></div>
+            <div class="bpm-readout"><strong id="bpmReadout">—</strong><span>BPM · odhad</span></div>
+          </div>
+          <label class="field"><span>Odhad nástrojových vrstev</span><textarea id="instrumentSummary" rows="5" readonly placeholder="Nejprve načtěte audio."></textarea></label>
+          <label class="field"><span>Kandidátní akcenty</span><textarea id="cueText" rows="6" placeholder="Po analýze se zde zobrazí návrhy značek."></textarea></label>
+          <label class="field"><span>Energetická okna · 10 s</span><textarea id="sectionText" rows="7" placeholder="Po analýze se zde zobrazí energetická okna."></textarea></label>
+          <p class="small-note">Frekvenční heuristika neumí oddělit jednotlivé stopy. Nástrojové vrstvy potvrďte poslechem.</p>
+        </section>
+
+        <section class="editor-content" data-editor-panel="production">
+          <div class="section-intro">
+            <span class="eyebrow">PODLE PODKLADŮ</span>
+            <h2>Produkční zadání</h2>
+            <p>Produkční informace se tisknou odděleně od vlastních návrhů LD.</p>
+          </div>
+          <label class="field"><span>Poznámky choreografů</span><textarea data-production="choreography" rows="3"></textarea></label>
+          <label class="field"><span>Téma a charakter čísla</span><textarea data-production="theme" rows="3"></textarea></label>
+          <label class="field"><span>Kostýmy</span><textarea data-production="costumes" rows="3"></textarea></label>
+          <label class="field"><span>Rekvizity</span><textarea data-production="props" rows="3"></textarea></label>
+          <label class="field"><span>Požadavky na světla</span><textarea data-production="lighting" rows="3"></textarea></label>
+          <label class="field"><span>LED obsah a videoprojekce</span><textarea data-production="led" rows="3"></textarea></label>
+          <label class="field"><span>Speciální efekty</span><textarea data-production="effects" rows="3"></textarea></label>
+          <label class="field"><span>Další produkční poznámky</span><textarea data-production="other" rows="3"></textarea></label>
+        </section>
+
+        <section class="editor-content" data-editor-panel="ld">
+          <div class="section-intro">
+            <span class="eyebrow">SAMOSTATNÁ ČÁST</span>
+            <h2>Návrhy LD</h2>
+            <p>Vlastní doporučení, přechody a body k ověření na zkoušce.</p>
+          </div>
+          <label class="field"><span>Návrhy, přechody a poznámky</span><textarea data-state="ld_proposals" rows="18" placeholder="Vlastní návrhy světelného designu…"></textarea></label>
+          <div class="info-card"><span class="info-icon">i</span><p>Návrhy LD jsou na tiskovém listu barevně oddělené od produkčního zadání.</p></div>
+        </section>
+
+        <section class="editor-content" data-editor-panel="layout">
+          <div class="section-intro">
+            <span class="eyebrow">TISKOVÝ VÝSTUP</span>
+            <h2>Vzhled stránky</h2>
+            <p>Úpravy se okamžitě promítají do náhledu a exportu.</p>
+          </div>
+          <label class="field"><span>Barva zvýraznění</span>
+            <select id="accentSelect">
+              <option value="#16a9a0">Tyrkysová</option>
+              <option value="#4c83d9">Modrá</option>
+              <option value="#8a62c9">Fialová</option>
+              <option value="#d45b55">Červená</option>
+              <option value="#cf9b30">Zlatá</option>
+            </select>
+          </label>
+          <label class="switch-row"><span><strong>Tmavé tiskové pozadí</strong><small>Použije tmavé pozadí v náhledu i exportu.</small></span><input id="darkToggle" type="checkbox"><i></i></label>
+          <label class="switch-row"><span><strong>Zobrazit waveform</strong><small>Vypne waveform v tiskové stránce.</small></span><input id="waveToggle" type="checkbox" checked><i></i></label>
+          <label class="switch-row"><span><strong>Zobrazit reference</strong><small>Vypne obrazové reference na druhé straně.</small></span><input id="refsToggle" type="checkbox" checked><i></i></label>
+          <div class="reference-manager">
+            <div class="reference-manager-head"><strong>Vizuální reference</strong><button id="addReferenceInline" class="mini-button" type="button">+ Přidat</button></div>
+            <div id="referenceList" class="reference-list"><p class="empty-state">Zatím bez obrázků.</p></div>
+            <small>Na druhou stranu lze přidat až čtyři obrázky.</small>
+          </div>
+        </section>
+      </aside>
+
+      <section class="right-workspace" aria-label="Náhled a audio">
+        <div class="right-tabs">
+          <button class="right-tab active" data-view-tab="preview" type="button"><span class="tab-symbol">▤</span>Tiskový náhled</button>
+          <button class="right-tab" data-view-tab="audio" type="button"><span class="tab-symbol">◉</span>Audio a značky</button>
+          <div class="right-tabs-spacer"></div>
+          <span class="autosave-state" id="saveStatus">Změny se ukládají lokálně</span>
+        </div>
+
+        <section class="view-panel preview-view active" data-view-panel="preview">
+          <div class="view-heading">
+            <div><span class="eyebrow">NÁHLED DOKUMENTU</span><h2>Tisková stránka</h2></div>
+            <div class="segmented-control" aria-label="Strana náhledu">
+              <button class="active" data-page="1" type="button">01 · Hudba</button>
+              <button data-page="2" type="button">02 · Produkce</button>
+            </div>
+          </div>
+          <div class="sheet-stage">
+            <article id="sheetPreview" class="sheet-preview" aria-label="Náhled tiskové strany"></article>
+          </div>
+          <div class="preview-footnote"><span class="footnote-mark">i</span> Tiskový formát A4 na šířku · 25 fps · automatické hudební odhady vždy ověřte poslechem.</div>
+        </section>
+
+        <section class="view-panel audio-view" data-view-panel="audio">
+          <div class="view-heading audio-heading">
+            <div><span class="eyebrow">POSLECHOVÁ KONTROLA</span><h2>Audio a editovatelné značky</h2></div>
+            <button id="loadAudioInline" class="button primary" type="button">Načíst audio</button>
+          </div>
+          <div class="audio-file-row" id="audioFileRow">
+            <span class="audio-file-icon">♫</span>
+            <div><strong id="audioFileName">Žádné audio</strong><small id="audioFileMeta">WAV · MP3 · FLAC · M4A · AAC · OGG · AIFF</small></div>
+            <label class="zoom-control"><span>Zoom waveformu</span><input id="zoomRange" type="range" min="1" max="4" step="0.25" value="1"><output id="zoomValue">1×</output></label>
+          </div>
+          <div class="transport-card">
+            <div class="transport-buttons"><button id="playButton" class="play-button" type="button" aria-label="Přehrát">▶</button><button id="stopButton" class="stop-button" type="button" aria-label="Stop">■</button></div>
+            <div class="transport-time"><strong id="currentTimecode">00:00:00:00</strong><span>/</span><span id="totalTimecode">00:00:00:00</span></div>
+            <input id="seekRange" class="seek-range" type="range" min="0" max="1000" value="0" aria-label="Pozice skladby">
+            <audio id="audioPlayer" controls preload="metadata"></audio>
+          </div>
+          <div class="waveform-panel">
+            <div class="waveform-topline"><div><strong>Waveform</strong><span>Kliknutím posuňte playhead · značky lze přetahovat</span></div><span class="fps-pill">25 FPS</span></div>
+            <div id="waveformScroller" class="waveform-scroller" tabindex="0" aria-label="Posuvný waveform">
+              <canvas id="waveformCanvas" height="246"></canvas>
+              <div id="waveformEmpty" class="waveform-empty"><span class="waveform-empty-icon">〰</span><strong>Načtěte skladbu</strong><span>Waveform a návrhy značek se vytvoří lokálně v prohlížeči.</span></div>
+            </div>
+          </div>
+          <div class="markers-section">
+            <div class="markers-heading">
+              <div><span class="eyebrow">EDITOVATELNÉ ZNAČKY</span><h3>Časové body skladby</h3></div>
+              <div class="marker-actions">
+                <label class="filter-select"><span>Vrstva</span><select id="instrumentFilter"><option>Všechny</option><option>Bicí/perkuse</option><option>Bas/kopák</option><option>Tónová vrstva</option><option>Bez přiřazení</option></select></label>
+                <button id="generateMarkersButton" class="button secondary" type="button">✦ Značky z odhadu</button>
+                <button id="addMarkerButton" class="button primary" type="button">+ Přidat</button>
+                <button id="removeMarkerButton" class="button danger-outline" type="button">Odebrat</button>
+              </div>
+            </div>
+            <div class="marker-table-wrap">
+              <table class="marker-table">
+                <thead><tr><th>Název značky</th><th>Čas · HH:MM:SS:FF</th><th>Typ</th><th>Nástroj / vrstva</th><th></th></tr></thead>
+                <tbody id="markerTableBody"><tr><td colspan="5" class="empty-row">Načtěte audio nebo přidejte značku.</td></tr></tbody>
+              </table>
+            </div>
+            <p class="small-note">Doporučení jsou návrhy, nikoli automaticky potvrzené cue. Každou značku lze upravit v tabulce nebo přetáhnout na waveformu.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div id="printPages" aria-hidden="true"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js" defer></script>
+</body>
+</html>

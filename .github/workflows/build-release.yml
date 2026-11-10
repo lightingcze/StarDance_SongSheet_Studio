@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: stardance-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   package:
     strategy:
@@ -64,6 +68,10 @@ jobs:
           release_tag="$GITHUB_REF_NAME"
           if [[ "$GITHUB_REF" == refs/heads/release/v* ]]; then
             release_tag="${GITHUB_REF_NAME#release/}"
+          fi
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            echo "Release $release_tag already exists; keeping the published assets."
+            exit 0
           fi
           gh release create "$release_tag" release-assets/* \
             --target "$GITHUB_SHA" \

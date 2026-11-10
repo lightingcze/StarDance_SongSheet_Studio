@@ -37,7 +37,7 @@ Na Linuxu může být Tkinter potřeba doinstalovat z balíčků distribuce. Zvu
 
 - Windows: v PowerShellu spusťte `packaging/build_windows.ps1`. Výsledkem je `dist/StarDanceSongSheet.exe`.
 - macOS: spusťte `packaging/build_macos.command`. Výsledkem je `dist/StarDanceSongSheet-macOS.dmg`.
-- GitHub Actions: workflow `Build desktop packages` sestaví oba cíle a přiloží EXE a DMG jako artefakty běhu.
+- GitHub Actions: workflow `Build desktop packages` sestaví oba cíle a přiloží EXE a DMG jako artefakty běhu. Tag `v*` nebo push na větev `release/v*` vytvoří GitHub Release s oběma instalátory.
 
 Windows a macOS balíčky se musí sestavit na příslušném systému. Tento zdrojový projekt lze sestavit přes GitHub Actions po přidání do repozitáře. Mac aplikace není podepsaná ani notarizovaná; Gatekeeper může při prvním spuštění zobrazit potvrzení. Windows EXE také není podepsané certifikátem vydavatele.
 

@@ -1,0 +1,39 @@
+name: Build desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: StarDanceSongSheet-Windows
+            file: dist/StarDanceSongSheet.exe
+          - os: macos-latest
+            artifact: StarDanceSongSheet-macOS
+            file: dist/StarDanceSongSheet-macOS.dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build Windows EXE
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/build_windows.ps1
+      - name: Build macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash packaging/build_macos.command
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.file }}
+          if-no-files-found: error

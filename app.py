@@ -14,6 +14,8 @@ import threading
 import tkinter as tk
 import uuid
 import wave
+import csv
+import urllib.request
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
 from typing import Any
@@ -45,11 +47,22 @@ DEFAULTS: dict[str, Any] = {
     "waveform": [], "cues": "", "sections": "", "ld_proposals": "",
     "markers": [],
     "instrument_summary": "", "instrument_summary_short": "", "instrument_events": [],
+    "instrument_activity": {"model": "YAMNet/AudioSet", "step": 0.48, "rows": []},
     "references": [], "accent": "#16A9A0", "dark": False,
     "show_waveform": True, "show_references": True,
 }
 
-INSTRUMENT_FILTERS = ["Všechny", "Bicí/perkuse", "Bas/kopák", "Tónová vrstva", "Bez přiřazení"]
+INSTRUMENT_FILTERS = [
+    "Všechny", "Vokál", "Bicí/perkuse", "Bas/kopák", "Akustická kytara",
+    "Basová kytara", "Elektrická kytara", "Kytara", "Klávesy", "Syntetizátor",
+    "Varhany", "Housle", "Violoncello", "Kontrabas", "Flétna", "Saxofon",
+    "Trubka", "Trombon", "Klarinet", "Harfa", "Akordeon", "Harmonika",
+    "Banjo", "Mandolína", "Sitar", "Tónová vrstva", "Bez přiřazení",
+]
+YAMNET_MODEL_URL = "https://huggingface.co/audiomagic/yamnet-onnx/resolve/main/yamnet.onnx?download=true"
+YAMNET_LABELS_URL = "https://huggingface.co/audiomagic/yamnet-onnx/resolve/main/yamnet_class_map.csv?download=true"
+YAMNET_HOP = 7680  # 0.48 s at 16 kHz, rounded to 25 fps in the UI.
+YAMNET_CHUNK = 491520  # 30.72 s, the fixed input used by the ONNX export.
 
 
 def app_resource(relative: str) -> Path:
@@ -80,6 +93,252 @@ def display_time(seconds: float) -> str:
     mm, rem = divmod(rem, 60 * FPS)
     ss, ff = divmod(rem, FPS)
     return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+
+
+def yamnet_category(label: str) -> str:
+    """Map AudioSet labels to useful, editable instrument filters."""
+    name = str(label or "").lower()
+    if "acoustic guitar" in name:
+        return "Akustická kytara"
+    if "bass guitar" in name:
+        return "Basová kytara"
+    if "electric guitar" in name:
+        return "Elektrická kytara"
+    if re.search(r"\bguitar\b", name):
+        return "Kytara"
+    if re.search(r"drum|cymbal|hi.?hat|percussion|timpani|tambourine|marimba|xylophone", name):
+        return "Bicí/perkuse"
+    if re.search(r"piano|keyboard|harpsichord|celesta", name):
+        return "Klávesy"
+    if "synthesizer" in name:
+        return "Syntetizátor"
+    if "organ" in name:
+        return "Varhany"
+    if re.search(r"violin|fiddle", name):
+        return "Housle"
+    if "cello" in name:
+        return "Violoncello"
+    if re.search(r"double bass|contrabass", name):
+        return "Kontrabas"
+    if "flute" in name:
+        return "Flétna"
+    if "saxophone" in name:
+        return "Saxofon"
+    if "trumpet" in name:
+        return "Trubka"
+    if "trombone" in name:
+        return "Trombon"
+    if "clarinet" in name:
+        return "Klarinet"
+    if "harp" in name:
+        return "Harfa"
+    if "accordion" in name:
+        return "Akordeon"
+    if "harmonica" in name:
+        return "Harmonika"
+    if "banjo" in name:
+        return "Banjo"
+    if "mandolin" in name:
+        return "Mandolína"
+    if re.search(r"\bsitar\b", name):
+        return "Sitar"
+    if re.search(r"singing(?! bowl)|choir|vocal music", name):
+        return "Vokál"
+    return ""
+
+
+def _yamnet_cache_dir() -> Path:
+    if os.name == "nt":
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Caches"
+    else:
+        root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return root / "StarDanceSongSheet" / "models"
+
+
+def _download_yamnet_asset(url: str, target: Path, progress: Any = None) -> None:
+    if target.exists() and target.stat().st_size > 0:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(target.suffix + ".part")
+    request = urllib.request.Request(url, headers={"User-Agent": "StarDance-SongSheet-Studio/0.2"})
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response, partial.open("wb") as output:
+            total = int(response.headers.get("Content-Length", "0") or 0)
+            downloaded = 0
+            last_report = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                downloaded += len(chunk)
+                if progress and downloaded - last_report >= 8 * 1024 * 1024:
+                    last_report = downloaded
+                    size_text = f"{downloaded / (1024 * 1024):.0f} MB"
+                    if total:
+                        size_text += f" / {total / (1024 * 1024):.0f} MB"
+                    progress(f"Stahuji místní model YAMNet: {size_text}…")
+        if not partial.exists() or partial.stat().st_size == 0:
+            raise RuntimeError("Stažený soubor modelu je prázdný.")
+        partial.replace(target)
+    except Exception:
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def analyze_instrument_activity(path: str, progress: Any = None) -> dict[str, Any]:
+    """Run YAMNet locally; return per-class activity scores sampled every 0.48 s."""
+    try:
+        import onnxruntime as ort  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("Pro rozpoznání nástrojů chybí ONNX Runtime. Přeinstalujte aplikaci nebo závislosti.") from exc
+    executable = ffmpeg_executable()
+    if not executable:
+        raise RuntimeError("Dekodér ffmpeg není dostupný pro převod audia na mono 16 kHz.")
+    command = [executable, "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"]
+    decoded = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if decoded.returncode != 0 or not decoded.stdout:
+        detail = decoded.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError("Převod audia pro YAMNet se nezdařil: " + (detail[-1] if detail else "prázdný výstup"))
+    samples = np.nan_to_num(np.frombuffer(decoded.stdout, dtype="<f4"), copy=False)
+    if samples.size < 16000:
+        raise RuntimeError("Audio musí obsahovat alespoň jednu sekundu.")
+
+    cache = _yamnet_cache_dir()
+    model_path, labels_path = cache / "yamnet.onnx", cache / "yamnet_class_map.csv"
+    if progress:
+        progress("Připravuji model a seznam tříd AudioSet…")
+    _download_yamnet_asset(YAMNET_MODEL_URL, model_path, progress)
+    _download_yamnet_asset(YAMNET_LABELS_URL, labels_path, progress)
+    with labels_path.open("r", encoding="utf-8-sig", newline="") as label_file:
+        labels = list(csv.DictReader(label_file))
+    class_names: dict[int, str] = {}
+    category_indices: dict[str, list[int]] = {}
+    for row in labels:
+        try:
+            index = int(row.get("index", ""))
+        except (TypeError, ValueError):
+            continue
+        name = row.get("display_name", "")
+        if not name:
+            continue
+        class_names[index] = name
+        category = yamnet_category(name)
+        if category:
+            category_indices.setdefault(category, []).append(index)
+    if len(class_names) < 500:
+        raise RuntimeError("Seznam tříd AudioSet je neúplný nebo má neznámý formát.")
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = max(1, min(4, os.cpu_count() or 1))
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
+    input_info = session.get_inputs()[0]
+    if progress:
+        progress("YAMNet vyhodnocuje nástroje v časových úsecích; audio zůstává v počítači…")
+    frame_count = int(math.ceil(samples.size / YAMNET_HOP))
+    activity: dict[str, list[float]] = {category: [0.0] * frame_count for category in category_indices}
+    chunk_start, chunk_number, previous = 0, 0, False
+    while chunk_start < samples.size:
+        chunk = np.zeros(YAMNET_CHUNK, dtype=np.float32)
+        end = min(samples.size, chunk_start + YAMNET_CHUNK)
+        chunk[:end - chunk_start] = samples[chunk_start:end]
+        shape = input_info.shape
+        if isinstance(shape, (list, tuple)) and len(shape) == 2:
+            tensor = chunk.reshape(1, -1)
+        elif isinstance(shape, (list, tuple)) and len(shape) == 1:
+            tensor = chunk
+        else:
+            raise RuntimeError(f"Neznámý vstupní formát modelu YAMNet: {shape}")
+        outputs = session.run(None, {input_info.name: tensor})
+        scores = None
+        for output in outputs:
+            candidate = np.asarray(output)
+            if candidate.size >= len(class_names) and candidate.size % len(class_names) == 0:
+                matrix = candidate.reshape(-1, len(class_names))
+                if matrix.shape[0] > 0:
+                    scores = matrix
+                    break
+        if scores is None:
+            raise RuntimeError("Model YAMNet nevrátil skóre tříd AudioSet.")
+        base = int(round(chunk_start / YAMNET_HOP))
+        first_frame = 1 if previous else 0
+        for frame in range(first_frame, scores.shape[0]):
+            target = base + frame
+            if target >= frame_count:
+                break
+            vector = scores[frame]
+            for category, indices in category_indices.items():
+                activity[category][target] = max(float(vector[index]) for index in indices if index < vector.size)
+        chunk_number += 1
+        if progress:
+            progress(f"YAMNet analyzuje časovou osu… část {chunk_number}")
+        if base + scores.shape[0] >= frame_count:
+            break
+        next_start = chunk_start + (scores.shape[0] - 1) * YAMNET_HOP
+        if next_start <= chunk_start:
+            break
+        chunk_start, previous = next_start, True
+
+    rows = [
+        {"instrument": category, "values": [round(value, 3) for value in values]}
+        for category, values in activity.items()
+        if max(values, default=0.0) >= 0.05
+    ]
+    rows.sort(key=lambda row: max(row["values"], default=0.0), reverse=True)
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        values = row["values"]
+        peak = max(values, default=0.0)
+        if peak < 0.18:
+            continue
+        threshold = max(0.12, peak * 0.42)
+        regions: list[tuple[int, int, float]] = []
+        start = last = -1
+        region_peak = 0.0
+        for index, value in enumerate(values):
+            if value >= threshold:
+                if start < 0:
+                    start, region_peak = index, value
+                last, region_peak = index, max(region_peak, value)
+            elif start >= 0 and index - last > 1:
+                regions.append((start, last, region_peak))
+                start, last, region_peak = -1, -1, 0.0
+        if start >= 0:
+            regions.append((start, last, region_peak))
+        selected = [item for item in regions if item[1] - item[0] >= 1 or item[2] >= 0.34]
+        selected.sort(key=lambda item: item[2], reverse=True)
+        for region_start, _region_end, region_peak in selected[:8]:
+            events.append({
+                "id": uuid.uuid4().hex,
+                "time": round(region_start * 0.48 * FPS) / FPS,
+                "label": f"Možná aktivita: {row['instrument'].lower()}",
+                "kind": "Nástroj",
+                "instrument": row["instrument"],
+                "activity_score": round(region_peak, 3),
+                "evidence": f"YAMNet skóre {region_peak:.2f} · ověřit poslechem",
+                "source": "yamnet",
+            })
+    events.sort(key=lambda item: item["activity_score"], reverse=True)
+    events = sorted(events[:80], key=lambda item: item["time"])
+    detected = [row["instrument"] for row in rows[:7]]
+    short = "YAMNet/AudioSet: " + (" · ".join(detected) if detected else "bez silné shody")
+    summary = (
+        "YAMNet/AudioSet zobrazuje skóre shody tříd v úsecích po 0,48 s. "
+        "Skóre není kalibrovaná pravděpodobnost ani důkaz izolované stopy. "
+        "Smíšené nahrávky a podobné barvy zvuku mohou vést k záměně; nástroje i značky ověřte poslechem."
+    )
+    return {
+        "instrument_activity": {"model": "YAMNet/AudioSet", "step": 0.48, "rows": rows},
+        "instrument_events": events,
+        "instrument_summary_short": short,
+        "instrument_summary": summary,
+    }
 
 
 def estimate_audio(path: str) -> dict[str, Any]:
@@ -552,6 +811,7 @@ class SongSheetApp:
         self.rendered: dict[int, Image.Image] = {}
         self.pending_render: str | None = None
         self.analysis_queue: queue.Queue[tuple[bool, Any]] = queue.Queue()
+        self.instrument_queue: queue.Queue[tuple[str, int, str, Any]] = queue.Queue()
         self.playback_queue: queue.Queue[tuple[bool, Any]] = queue.Queue()
         self.playback_path: str | None = None
         self.playback_temp_path: str | None = None
@@ -565,10 +825,15 @@ class SongSheetApp:
         self.playback_lock = threading.RLock()
         self.playhead_item: int | None = None
         self.playhead_label_item: int | None = None
+        self.instrument_playhead_item: int | None = None
+        self.instrument_plot: tuple[int, int, int, int] = (148, 0, 0, 0)
+        self.instrument_job_id = 0
+        self.instrument_busy = False
         self.marker_drag_id: str | None = None
         self.selected_marker_id: str | None = None
         self._updating_slider = False
         self.audio_status = tk.StringVar(value="Načtěte zvukový soubor pro waveform a analýzu.")
+        self.instrument_status_var = tk.StringVar(value="YAMNet/AudioSet: časová skóre se načtou po prvním spuštění analýzy.")
         self._build_ui()
         self.root.after(200, self._poll_analysis)
         self.root.after(50, self._poll_transport)
@@ -638,6 +903,16 @@ class SongSheetApp:
         self.position_scale.bind("<ButtonRelease-1>", self._on_position_release)
         self.instrument_summary_var = tk.StringVar(value="Nástrojové vrstvy se analyzují heuristicky; přesný instrument ověřte poslechem.")
         ttk.Label(parent, textvariable=self.instrument_summary_var, wraplength=820, justify="left", foreground="#6B5A32").pack(fill="x", padx=13, pady=(0, 7))
+        instrument_tools = ttk.Frame(parent, padding=(10, 0, 10, 4))
+        instrument_tools.pack(fill="x")
+        self.instrument_analyze_button = ttk.Button(instrument_tools, text="♫ Analyzovat nástroje v čase (YAMNet)", command=self.analyze_instrument_layers)
+        self.instrument_analyze_button.pack(side="left")
+        ttk.Label(instrument_tools, textvariable=self.instrument_status_var, wraplength=670, justify="left", foreground="#5F7078").pack(side="left", fill="x", expand=True, padx=10)
+
+        self.instrument_timeline_canvas = tk.Canvas(parent, height=105, background="#111A1F", highlightthickness=0)
+        self.instrument_timeline_canvas.pack(fill="x", padx=12, pady=(0, 7))
+        self.instrument_timeline_canvas.bind("<Configure>", lambda _e: self.draw_instrument_timeline())
+        self.instrument_timeline_canvas.bind("<Button-1>", self._instrument_timeline_click)
 
         self.timeline_canvas = tk.Canvas(parent, height=320, background="#16222A", highlightthickness=0)
         self.timeline_canvas.pack(fill="x", padx=12, pady=(0, 6))
@@ -661,16 +936,18 @@ class SongSheetApp:
 
         table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
         table_frame.pack(fill="both", expand=True)
-        columns = ("label", "time", "kind", "instrument")
+        columns = ("label", "time", "kind", "instrument", "evidence")
         self.marker_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=10, selectmode="browse")
         self.marker_tree.heading("label", text="Název značky")
         self.marker_tree.heading("time", text="Čas (HH:MM:SS:FF)")
         self.marker_tree.heading("kind", text="Typ")
         self.marker_tree.heading("instrument", text="Nástroj / vrstva")
+        self.marker_tree.heading("evidence", text="Skóre / zdroj")
         self.marker_tree.column("label", width=420, minwidth=160, anchor="w")
         self.marker_tree.column("time", width=180, minwidth=140, anchor="center")
         self.marker_tree.column("kind", width=130, minwidth=100, anchor="center")
         self.marker_tree.column("instrument", width=220, minwidth=150, anchor="center")
+        self.marker_tree.column("evidence", width=180, minwidth=130, anchor="center")
         tree_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.marker_tree.yview)
         self.marker_tree.configure(yscrollcommand=tree_scroll.set)
         self.marker_tree.pack(side="left", fill="both", expand=True)
@@ -843,6 +1120,10 @@ class SongSheetApp:
         if not path:
             return
         self._close_playback()
+        self.instrument_job_id += 1
+        self.instrument_busy = False
+        if hasattr(self, "instrument_analyze_button"):
+            self.instrument_analyze_button.configure(state="normal")
         self.state["audio_path"] = path
         self.state["waveform"] = []
         self.state["markers"] = []
@@ -853,9 +1134,11 @@ class SongSheetApp:
         self.state["instrument_summary"] = ""
         self.state["instrument_summary_short"] = ""
         self.state["instrument_events"] = []
+        self.state["instrument_activity"] = {"model": "YAMNet/AudioSet", "step": 0.48, "rows": []}
         self.current_position = 0.0
         self.selected_marker_id = None
         self.instrument_summary_var.set("Analyzuji možné nástrojové vrstvy…")
+        self.instrument_status_var.set("YAMNet/AudioSet: připraveno k časové analýze.")
         self.instrument_filter_var.set("Všechny")
         self.vars["duration"].set("")
         self.vars["bpm"].set("")
@@ -986,8 +1269,63 @@ class SongSheetApp:
                     messagebox.showerror("Audio analýza", result)
         except queue.Empty:
             pass
+        self._poll_instrument_analysis()
         self._poll_playback_ready()
         self.root.after(200, self._poll_analysis)
+
+    def analyze_instrument_layers(self) -> None:
+        path = str(self.state.get("audio_path", ""))
+        if not path or not Path(path).exists():
+            messagebox.showinfo("Rozpoznání nástrojů", "Nejprve načtěte audio.")
+            return
+        if self.instrument_busy:
+            return
+        self.instrument_job_id += 1
+        token = self.instrument_job_id
+        self.instrument_busy = True
+        self.instrument_analyze_button.configure(state="disabled")
+        self.instrument_status_var.set("Příprava YAMNet/AudioSet. Při prvním spuštění se stáhne model; audio se neposílá přes síť.")
+        threading.Thread(target=self._instrument_worker, args=(path, token), daemon=True).start()
+
+    def _instrument_worker(self, path: str, token: int) -> None:
+        def report(message: str) -> None:
+            self.instrument_queue.put((path, token, "progress", message))
+        try:
+            result = analyze_instrument_activity(path, progress=report)
+            self.instrument_queue.put((path, token, "done", result))
+        except Exception as exc:
+            self.instrument_queue.put((path, token, "error", str(exc)))
+
+    def _poll_instrument_analysis(self) -> None:
+        try:
+            while True:
+                path, token, phase, payload = self.instrument_queue.get_nowait()
+                if path != self.state.get("audio_path") or token != self.instrument_job_id:
+                    continue
+                if phase == "progress":
+                    self.instrument_status_var.set(str(payload))
+                elif phase == "done":
+                    self.state.update(payload)
+                    self.instrument_summary_var.set(payload.get("instrument_summary", ""))
+                    self.instrument_status_var.set(
+                        f"Hotovo: {len(payload.get('instrument_activity', {}).get('rows', []))} tříd s aktivitou, "
+                        f"{len(payload.get('instrument_events', []))} kandidátních značek. Skóre ověřte poslechem."
+                    )
+                    self._refresh_marker_table()
+                    self._refresh_cue_text()
+                    self.draw_instrument_timeline()
+                    self.draw_timeline()
+                    self.schedule_preview()
+                    self.audio_status.set("Časová analýza YAMNet/AudioSet dokončena; kandidáty ověřte poslechem.")
+                    self.instrument_busy = False
+                    self.instrument_analyze_button.configure(state="normal")
+                elif phase == "error":
+                    self.instrument_status_var.set("Časová analýza nástrojů se nezdařila.")
+                    self.instrument_busy = False
+                    self.instrument_analyze_button.configure(state="normal")
+                    messagebox.showerror("Rozpoznání nástrojů", str(payload))
+        except queue.Empty:
+            pass
 
     def _poll_playback_ready(self) -> None:
         try:
@@ -1155,7 +1493,99 @@ class SongSheetApp:
             self.marker_canvas_items[str(marker.get("id"))] = (line, text)
         self.playhead_item = canvas.create_line(left, top, left, bottom, fill="#FF5D6C", width=2)
         self.playhead_label_item = canvas.create_text(left + 4, bottom - 4, text=tc25(self.current_position), anchor="sw", fill="#FF8791", font=("TkDefaultFont", 8, "bold"))
+        self.draw_instrument_timeline()
         self._move_playhead()
+
+    @staticmethod
+    def _instrument_matches_filter(instrument: str, selected_filter: str) -> bool:
+        if selected_filter in {"Všechny", "Bez přiřazení"}:
+            return True
+        if selected_filter == "Bicí/perkuse":
+            return instrument == "Bicí/perkuse"
+        if selected_filter == "Bas/kopák":
+            return instrument in {"Bas/kopák", "Basová kytara", "Kontrabas"}
+        if selected_filter == "Tónová vrstva":
+            return instrument not in {"", "Vokál", "Bicí/perkuse", "Bas/kopák", "Basová kytara", "Kontrabas"}
+        return instrument == selected_filter
+
+    def draw_instrument_timeline(self) -> None:
+        canvas = getattr(self, "instrument_timeline_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        self.instrument_playhead_item = None
+        width = max(320, canvas.winfo_width())
+        left, right, top = 152, width - 20, 23
+        selected_filter = self.instrument_filter_var.get() if hasattr(self, "instrument_filter_var") else "Všechny"
+        activity = self.state.get("instrument_activity") or {}
+        rows = list(activity.get("rows", []))
+        if selected_filter == "Bez přiřazení":
+            rows = []
+        elif selected_filter != "Všechny":
+            rows = [row for row in rows if self._instrument_matches_filter(str(row.get("instrument", "")), selected_filter)]
+        rows.sort(key=lambda row: max(row.get("values", []) or [0.0]), reverse=True)
+        rows = rows[:16]
+        row_height = 20
+        height = max(105, top + len(rows) * row_height + 37)
+        canvas.configure(height=height)
+        plot_bottom = top + max(1, len(rows)) * row_height
+        self.instrument_plot = (left, right, top, plot_bottom)
+        canvas.create_rectangle(0, 0, width, height, fill="#111A1F", outline="")
+        duration = self.duration_seconds()
+        if not rows:
+            message = "Spusťte analýzu YAMNet/AudioSet pro zobrazení nástrojů v čase." if not activity.get("rows") else "Pro vybraný filtr nejsou časová skóre."
+            canvas.create_text(width // 2, height // 2, text=message, fill="#91A2A8", font=("TkDefaultFont", 10))
+            return
+        palette = ["#2BB8AD", "#82AAF1", "#F0BD5A", "#C58CE6", "#EF7F78", "#73C68B", "#62BDE2", "#D39568"]
+        plot_width = max(1, right - left)
+        for row_index, row in enumerate(rows):
+            y = top + row_index * row_height
+            instrument = str(row.get("instrument", ""))
+            canvas.create_text(left - 8, y + row_height // 2, text=instrument, anchor="e", fill="#A8B7BC", font=("TkDefaultFont", 8))
+            canvas.create_rectangle(left, y + 2, right, y + row_height - 2, fill="#17242A", outline="")
+            values = row.get("values", []) or []
+            if not values:
+                continue
+            bins = min(len(values), plot_width)
+            color = palette[row_index % len(palette)]
+            rgb = tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+            for index in range(bins):
+                start = int(index * len(values) / bins)
+                end = max(start + 1, int((index + 1) * len(values) / bins))
+                score = max(float(value) for value in values[start:min(len(values), end)])
+                if score < 0.025:
+                    continue
+                amount = max(0.12, min(0.95, score * 1.5))
+                fill = "#" + "".join(f"{int(23 + (channel - 23) * amount):02x}" for channel in rgb)
+                x0 = left + int(index * plot_width / bins)
+                x1 = left + max(index + 1, int((index + 1) * plot_width / bins))
+                canvas.create_rectangle(x0, y + 2, min(right, x1), y + row_height - 2, fill=fill, outline="")
+            canvas.create_line(left, y + row_height, right, y + row_height, fill="#25373D")
+        if duration > 0:
+            for index in range(7):
+                x = left + int(plot_width * index / 6)
+                canvas.create_line(x, top, x, plot_bottom, fill="#34464D")
+                canvas.create_text(x, plot_bottom + 14, text=tc25(duration * index / 6), fill="#91A2A8", font=("TkDefaultFont", 7))
+        canvas.create_text(left, 9, text="YAMNet / AudioSet · skóre aktivity, ne pravděpodobnost", anchor="w", fill="#91A2A8", font=("TkDefaultFont", 8))
+        self.instrument_playhead_item = canvas.create_line(left, top, left, plot_bottom, fill="#FF6572", width=2)
+        self._move_instrument_playhead()
+
+    def _instrument_timeline_click(self, event: Any) -> None:
+        duration = self.duration_seconds()
+        if duration <= 0:
+            return
+        left, right, _top, _bottom = self.instrument_plot
+        ratio = max(0.0, min(1.0, (event.x - left) / max(1, right - left)))
+        self._seek_to(duration * ratio)
+
+    def _move_instrument_playhead(self) -> None:
+        if not self.instrument_playhead_item:
+            return
+        left, right, top, bottom = self.instrument_plot
+        duration = self.duration_seconds()
+        ratio = 0.0 if duration <= 0 else max(0.0, min(1.0, self.current_position / duration))
+        x = left + int((right - left) * ratio)
+        self.instrument_timeline_canvas.coords(self.instrument_playhead_item, x, top, x, bottom)
 
     def _time_at_canvas_x(self, x: int) -> float:
         duration = self.duration_seconds()
@@ -1176,6 +1606,7 @@ class SongSheetApp:
         if self.playhead_label_item:
             self.timeline_canvas.coords(self.playhead_label_item, min(right - 2, x + 4), bottom - 4)
             self.timeline_canvas.itemconfigure(self.playhead_label_item, text=tc25(self.current_position))
+        self._move_instrument_playhead()
 
     def _timeline_press(self, event: Any) -> None:
         time = self._time_at_canvas_x(event.x)
@@ -1235,7 +1666,7 @@ class SongSheetApp:
             return markers
         if selected_filter == "Bez přiřazení":
             return [marker for marker in markers if not marker.get("instrument")]
-        return [marker for marker in markers if marker.get("instrument") == selected_filter]
+        return [marker for marker in markers if self._instrument_matches_filter(str(marker.get("instrument", "")), selected_filter)]
 
     def _instrument_filter_changed(self, _event: Any = None) -> None:
         visible_ids = {str(marker.get("id")) for marker in self._visible_markers()}
@@ -1253,7 +1684,7 @@ class SongSheetApp:
         if selected_filter == "Bez přiřazení":
             events = []
         elif selected_filter != "Všechny":
-            events = [event for event in events if event.get("instrument") == selected_filter]
+            events = [event for event in events if self._instrument_matches_filter(str(event.get("instrument", "")), selected_filter)]
         existing = self.state.setdefault("markers", [])
         added = 0
         for event in events:
@@ -1271,6 +1702,9 @@ class SongSheetApp:
                 "time": event_time,
                 "kind": "Nástroj",
                 "instrument": instrument,
+                "activity_score": event.get("activity_score"),
+                "evidence": event.get("evidence", ""),
+                "source": event.get("source", ""),
             })
             added += 1
         self._refresh_marker_table()
@@ -1304,14 +1738,25 @@ class SongSheetApp:
         self.marker_tree.delete(*self.marker_tree.get_children())
         for marker in visible:
             marker_id = str(marker.setdefault("id", uuid.uuid4().hex))
-            self.marker_tree.insert("", "end", iid=marker_id, values=(marker.get("label", ""), tc25(float(marker.get("time", 0))), marker.get("kind", "Cue"), marker.get("instrument", "") or "Bez přiřazení"))
+            score = marker.get("activity_score")
+            evidence = marker.get("evidence", "") or (f"YAMNet {float(score):.2f}" if score is not None else marker.get("source", ""))
+            self.marker_tree.insert("", "end", iid=marker_id, values=(
+                marker.get("label", ""), tc25(float(marker.get("time", 0))), marker.get("kind", "Cue"),
+                marker.get("instrument", "") or "Bez přiřazení", evidence,
+            ))
         if selected and self.marker_tree.exists(selected):
             self.marker_tree.selection_set(selected)
             self.marker_tree.see(selected)
         self._updating_marker_tree = False
 
     def _refresh_cue_text(self) -> None:
-        lines = [f"{tc25(float(marker.get('time', 0)))}  [{marker.get('kind', 'Cue')} · {marker.get('instrument') or 'bez přiřazení'}] {marker.get('label', '')}" for marker in sorted(self.state.get("markers", []), key=lambda item: float(item.get("time", 0)))]
+        lines = []
+        for marker in sorted(self.state.get("markers", []), key=lambda item: float(item.get("time", 0))):
+            line = f"{tc25(float(marker.get('time', 0)))}  [{marker.get('kind', 'Cue')} · {marker.get('instrument') or 'bez přiřazení'}] {marker.get('label', '')}"
+            evidence = marker.get("evidence", "")
+            if evidence:
+                line += f"  · {evidence}"
+            lines.append(line)
         self.state["cues"] = "\n".join(lines)
         if hasattr(self, "text_widgets") and "cues" in self.text_widgets:
             self._replace_text("cues", self.state["cues"])
@@ -1476,6 +1921,9 @@ class SongSheetApp:
                     "time": round(max(0.0, marker_time) * FPS) / FPS,
                     "kind": str(item.get("kind", "Cue")),
                     "instrument": str(item.get("instrument", "") or ""),
+                    "activity_score": item.get("activity_score"),
+                    "evidence": str(item.get("evidence", "") or ""),
+                    "source": str(item.get("source", "") or ""),
                 })
             if not normalized and state.get("cues"):
                 for line in state["cues"].splitlines():
@@ -1494,6 +1942,9 @@ class SongSheetApp:
                 if p and not p.is_absolute():
                     state[key] = str((base / p).resolve())
             state["references"] = [str((base / p).resolve()) if not Path(p).is_absolute() else p for p in state.get("references", [])]
+            self.instrument_job_id += 1
+            self.instrument_busy = False
+            self.instrument_analyze_button.configure(state="normal")
             self._close_playback()
             self.current_position = 0.0
             self.state = state
@@ -1513,6 +1964,8 @@ class SongSheetApp:
             self.selected_marker_id = None
             self.instrument_filter_var.set("Všechny")
             self.instrument_summary_var.set(state.get("instrument_summary", ""))
+            activity_count = len((state.get("instrument_activity") or {}).get("rows", []))
+            self.instrument_status_var.set(f"Projekt obsahuje časovou osu YAMNet/AudioSet ({activity_count} tříd)." if activity_count else "YAMNet/AudioSet: časová skóre se načtou po prvním spuštění analýzy.")
             self._refresh_marker_table()
             self._refresh_cue_text()
             self.dark_var.set(bool(state.get("dark")))
@@ -1578,9 +2031,13 @@ class SongSheetApp:
         if not messagebox.askyesno("Nový projekt", "Začít nový song sheet? Neuložené změny budou ztraceny."):
             return
         self.state = json.loads(json.dumps(DEFAULTS))
+        self.instrument_job_id += 1
+        self.instrument_busy = False
+        self.instrument_analyze_button.configure(state="normal")
         self._close_playback()
         self.current_position = 0.0
         self.instrument_summary_var.set("Nástrojové vrstvy se analyzují heuristicky; přesný instrument ověřte poslechem.")
+        self.instrument_status_var.set("YAMNet/AudioSet: časová skóre se načtou po prvním spuštění analýzy.")
         self.instrument_filter_var.set("Všechny")
         self.project_path = None
         for key in ["title", "episode", "artist", "performer", "dance"]:

@@ -3,4 +3,5 @@ Pillow>=10.1,<13
 reportlab>=4.0,<5
 imageio-ffmpeg>=0.5,<1
 sounddevice>=0.5,<1
+onnxruntime>=1.20,<2
 pyinstaller>=6.10,<7

@@ -11,7 +11,8 @@ Lokální desktopový editor pro tiskové hudební song sheety StarDance. Vytvá
 - Waveform ze skutečného načteného audia, délka a automatický odhad BPM.
 - Návrhy akcentů a energetických oken s časovými značkami `HH:MM:SS:FF` při 25 fps.
 - Heuristický odhad nástrojových vrstev a kandidátní značky pro perkuse, bas/kopák a tónové vrstvy.
-- Filtr značek podle vrstvy a automatické přidání časových kandidátů z nástrojového odhadu.
+- Volitelný lokální rozbor YAMNet/AudioSet se skóre aktivity nástrojových tříd v časových úsecích po 0,48 s.
+- Časový přehled rozpoznaných tříd, filtr značek podle nástroje a přidání kandidátních značek ze zvoleného filtru.
 - Editor skladby, interpreta, účinkujících, tance, produkčních poznámek a vlastních návrhů LD.
 - Vložení až čtyř obrazových referencí na druhou stranu.
 - Nastavitelná barva, světlý/tmavý vzhled a zobrazení waveformu či referencí.
@@ -30,13 +31,13 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Na Linuxu může být Tkinter potřeba doinstalovat z balíčků distribuce. Aplikace zpracovává soubory lokálně a neposílá je do sítě.
+Na Linuxu může být Tkinter potřeba doinstalovat z balíčků distribuce. Zvuk se analyzuje lokálně. Při prvním spuštění YAMNet aplikace stáhne model a seznam tříd; samotné audio se do sítě neposílá.
 
 ## Vytvoření aplikace
 
 - Windows: v PowerShellu spusťte `packaging/build_windows.ps1`. Výsledkem je `dist/StarDanceSongSheet.exe`.
 - macOS: spusťte `packaging/build_macos.command`. Výsledkem je `dist/StarDanceSongSheet-macOS.dmg`.
-- GitHub Actions: workflow `Build desktop packages` sestaví oba cíle a přiloží EXE a DMG jako artefakty běhu. Push tagu ve tvaru `v*` navíc vytvoří GitHub Release s oběma soubory.
+- GitHub Actions: workflow `Build desktop packages` sestaví oba cíle a přiloží EXE a DMG jako artefakty běhu.
 
 Windows a macOS balíčky se musí sestavit na příslušném systému. Tento zdrojový projekt lze sestavit přes GitHub Actions po přidání do repozitáře. Mac aplikace není podepsaná ani notarizovaná; Gatekeeper může při prvním spuštění zobrazit potvrzení. Windows EXE také není podepsané certifikátem vydavatele.
 
@@ -44,16 +45,16 @@ Windows a macOS balíčky se musí sestavit na příslušném systému. Tento zd
 
 1. Zvolte **Načíst audio**. Waveform a hudební odhady se načtou na pozadí.
 2. V kartách editoru doplňte údaje o skladbě, produkční zadání a vlastní návrhy LD.
-3. Na kartě **Audio a značky** přehrávejte skladbu, klikněte do waveformu pro posun a přidejte vlastní časové značky. Použijte filtr vrstvy nebo **Značky z odhadu**; značky upravíte tažením nebo dvojklikem do buňky tabulky.
+3. Na kartě **Audio a značky** přehrávejte skladbu, klikněte do waveformu pro posun a přidejte vlastní časové značky. Volitelně spusťte **Analyzovat nástroje v čase (YAMNet)**; časová osa zobrazí skóre shody AudioSet tříd v úsecích po 0,48 s. Použijte filtr vrstvy nebo **Značky z odhadu**; značky upravíte tažením nebo dvojklikem do buňky tabulky.
 4. Vložte vizuální reference a dolaďte vzhled stránky.
 5. Přepínejte náhled mezi stranou 1 (hudba) a stranou 2 (produkce).
 6. Uložte JSON projekt a exportujte PDF nebo PNG.
 
-Produkční pole jsou určena pro věrný přepis podkladů. Návrhy LD mají samostatnou barevně označenou oblast. Automatické BPM, energetická okna, nástrojové vrstvy i kandidátní akcenty jsou pouze odhady. Frekvenční heuristika neumí oddělit jednotlivé stopy ani spolehlivě rozlišit například basu od kopáku či klávesy od kytary. Takt, první doby, fráze, instrumentaci a GO cue vždy ověřte poslechem.
+Produkční pole jsou určena pro věrný přepis podkladů. Návrhy LD mají samostatnou barevně označenou oblast. Automatické BPM, energetická okna, nástrojové vrstvy i kandidátní akcenty jsou pouze odhady. Frekvenční heuristika neumí oddělit jednotlivé stopy ani spolehlivě rozlišit například basu od kopáku či klávesy od kytary. YAMNet/AudioSet přidává konkrétnější časové skóre zvukových tříd, ale skóre není kalibrovaná pravděpodobnost ani izolovaná stopa. Takt, první doby, fráze, instrumentaci a GO cue vždy ověřte poslechem.
 
 ## Poznámky k měření
 
-Tempo se hledá z krátké RMS obálky. Nástrojové vrstvy se odhadují z frekvenčních pásem, spektrální plochosti a transientů. Tlačítko **Značky z odhadu** vytvoří časové kandidáty, které lze filtrovat podle vrstvy. Waveform ukazuje relativní špičkovou úroveň nahrávky. Energetické úseky jsou desetisekundová okna hlasitosti, nikoli rozpoznané hudební fráze. Časové kódy jsou zaokrouhleny na nejbližší snímek při 25 fps. Aplikace nenahrazuje poslechovou kontrolu ani provozní ověření cue na zkoušce.
+Tempo se hledá z krátké RMS obálky. Základní nástrojové vrstvy se odhadují z frekvenčních pásem, spektrální plochosti a transientů; volitelný YAMNet/AudioSet vytváří skóre shody rozpoznaných tříd po 0,48 s a kandidátní časové úseky. Tlačítko **Značky z odhadu** vytvoří editovatelné časové kandidáty, které lze filtrovat podle vrstvy. Waveform ukazuje relativní špičkovou úroveň nahrávky. Energetické úseky jsou desetisekundová okna hlasitosti, nikoli rozpoznané hudební fráze. Časové kódy jsou zaokrouhleny na nejbližší snímek při 25 fps. Aplikace nenahrazuje poslechovou kontrolu ani provozní ověření cue na zkoušce.
 
 ## Licence písem
 
@@ -61,4 +62,4 @@ Vykreslování českého textu používá DejaVu Sans. Licenční text je v `ass
 
 ## Webová verze
 
-Otevřete Start_Web_Editor.cmd nebo postupujte podle návodu v web/README.md. Webový editor běží místně v prohlížeči; audio a obrazové reference zůstávají na vašem zařízení.
+Otevřete `Start_Web_Editor.cmd` nebo postupujte podle návodu v `web/README.md`. Webový editor běží místně v prohlížeči; audio a obrazové reference zůstávají na vašem zařízení. Vyžádané modely se stahují při prvním použití. Pokud výslovně spustíte AcoustID, službě odejde akustický fingerprint, ne audio.

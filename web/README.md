@@ -1,30 +1,21 @@
 # StarDance SongSheet Studio · Web
 
-Lokální webová verze editoru. Běží přímo v prohlížeči bez instalace balíčků, bez účtu a bez nahrávání souborů na server.
+Lokální editor pro prohlížeč. Spusťte `Start_Web_Editor.cmd` ve Windows nebo spusťte z kořenové složky projektu:
 
-## Spuštění ve Windows
+```bash
+python -m http.server 8765 --bind 127.0.0.1
+```
 
-Z kořenové složky projektu spusťte Start_Web_Editor.cmd. Otevře se lokální stránka na adrese http://127.0.0.1:8765/web/. Server zůstane běžet v samostatném okně; po dokončení ho zavřete.
+Pak otevřete `http://127.0.0.1:8765/web/`. Server pouze poskytuje statické soubory přes localhost.
 
-Python 3 musí být dostupný jako příkaz python. Alternativně:
+## Funkce
 
-    python -m http.server 8765 --bind 127.0.0.1
+- Desktopové rozhraní, náhled dvou stran A4 a export PDF/PNG.
+- Přenosný projekt JSON, audio přehrávač, waveform a editovatelné značky s časováním 25 fps.
+- YAMNet/AudioSet časové skóre nástrojových tříd v úsecích po 0,48 s.
+- Rozpoznání 7/10sekundového vzorku specializovaným klasifikátorem a volitelné oddělení čtyř vrstev přes SCNet.
+- Volitelná identifikace skladby přes AcoustID s fingerprintem a uživatelským API klíčem.
 
-Pak otevřete http://127.0.0.1:8765/web/.
+Audio, obrázky i inference běží v prohlížeči. Při spuštění konkrétní analýzy může prohlížeč stáhnout běhovou knihovnu nebo model od uvedených poskytovatelů; samotné audio se při těchto analýzách neodesílá. Pokud uživatel výslovně spustí AcoustID, službě odejde akustický fingerprint, ne zvuk. Bezplatná služba AcoustID je určena pro nekomerční použití.
 
-## Co webová verze umí
-
-- Vyplnit skladbu, interpreta, účinkující, tanec, produkční zadání a návrhy LD.
-- Načíst místní audio, přehrávat ho, posouvat playhead a procházet waveform se zoomem.
-- Vytvářet a upravovat značky, přetahovat je ve waveformu a filtrovat podle vrstvy.
-- Vytvořit kandidátní akcenty, energetická okna a orientační nástrojové vrstvy.
-- Přidat až čtyři obrazové reference, upravit barevný vzhled a zobrazit dvě tiskové A4 stránky.
-- Uložit přenosný projektový JSON včetně audia a referencí, exportovat dvě PNG a vytisknout či uložit dvoustránkové PDF přes dialog prohlížeče.
-
-## Data a kompatibilita
-
-Audio a obrázky se načítají a zpracovávají na vašem zařízení. Webová verze je samostatná statická stránka; server pouze zpřístupní soubory aplikace na 127.0.0.1. Pro audio analýzu je potřeba prohlížeč s Web Audio API. Podpora formátů závisí na kodecích daného prohlížeče; při problému zkuste WAV nebo MP3.
-
-Pracovní formulář se ukládá do lokálního úložiště prohlížeče. Projektový JSON je přenosný a obsahuje přiložené audio a obrázky, takže může být velký. Existující desktopové projekty ve formátu stardance-songsheet lze otevřít pro údaje, značky a waveform; audio a obrazové soubory, na které odkazují cestou na disku, přidejte do webové verze znovu přes výběr souboru.
-
-Webová verze je záměrně v čistém HTML, CSS a JavaScriptu bez závislostí. Rozhraní je v index.html, vzhled v styles.css a chování v app.js.
+Skóre modelů nejsou kalibrované pravděpodobnosti ani izolované zvukové stopy. Třídy, časové značky a oddělené vrstvy ověřte poslechem. Licence a odkazy na modely jsou uvedeny přímo v editoru a v `../THIRD_PARTY_NOTICES.md`.

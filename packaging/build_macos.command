@@ -8,6 +8,7 @@ python3 -m PyInstaller --noconfirm --clean --windowed \
   --name StarDanceSongSheet \
   --collect-all imageio_ffmpeg \
   --collect-all sounddevice \
+  --collect-all onnxruntime \
   --add-data "assets:assets" \
   app.py
 

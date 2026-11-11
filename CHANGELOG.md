@@ -8,6 +8,7 @@
 - Doplněno undo/redo úprav not a světelných značek v desktopu i webu.
 - Doplněn export hudební mapy do samostatného PNG v desktopu i webu.
 - Opraveno vykreslení tiskových PNG při načtení fontů DejaVu Sans.
+- Windows build připnut na runner `windows-2022`, aby odpovídal generátoru Visual Studio 2022 používanému nativním C++ enginem.
 - Testovací web Sites aktualizován na v11; zůstává zachován LD cuebook a přístupová politika uzavřené skupiny.
 - Zachováno 25fps časování světelných značek; AI a automatické hudební návrhy zůstávají kandidáty k poslechovému ověření.
 

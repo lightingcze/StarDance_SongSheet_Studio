@@ -19,9 +19,9 @@ Značky odvozené z analýzy budou návrhy k poslechu a úpravě. Značka ani v�
 | Piano roll a notová aktivita | Hotovo v obou klientech | Přímé tažení i tabulka; filtr vybrané stopy a kandidátní cue podle filtru. Undo/redo not a značek i export mapy do PNG fungují v desktopu i webu. |
 | LD návrhy | Implementováno | Nástup a hustota not vytvářejí upravitelné návrhy, které vyžadují poslechovou kontrolu. |
 | Licence vah | Výslovně potvrzen nekomerční pilot | Uživatel upřesnil, že veškeré použití modelových vah v pilotu bude nekomerční. Aplikace zobrazí upozornění CC BY-NC 4.0 před prvním stažením. |
-| Windows/macOS balíčky a hardware | Čeká | Sestavení a test musí proběhnout na těchto OS; aktuální workspace je Linux. |
+| Windows/macOS balíčky a hardware | Oprava Windows runneru připravena; CI se opakuje | První Windows build skončil ještě před kompilací: `windows-latest` nyní používá VS 2026, zatímco skript cílí na VS 2022. Workflow je připnutý na `windows-2022`; fyzický hardware a dlouhé inferenční běhy stále čekají na pilotní kontrolu. |
 | Webová stránka Sites | Nasazeno jako verze 11 | Zachován LD cuebook, jeho podklady i předání do editoru; URL zůstala stejná. Přidané undo/redo a export hudební mapy do PNG. Statická kontrola skriptů prošla; vizuální kontrola v prohlížeči v tomto workspace nebyla dostupná. |
-| GitHub vydání | v0.3.0 | Zdrojové změny, dokumentace a Windows/macOS balíčky jsou publikovány v [GitHub Releases](https://github.com/lightingcze/StarDance_SongSheet_Studio/releases/tag/v0.3.0). |
+| GitHub vydání | v0.3.0 se sestavuje | Zdrojové změny a dokumentace jsou publikovány; release workflow po opravě runneru opakuje sestavení Windows/macOS balíčků. [GitHub Releases](https://github.com/lightingcze/StarDance_SongSheet_Studio/releases/tag/v0.3.0). |
 | Pilot na skutečných skladbách | Čeká na audio | V připojené složce „Nahrávky kapely čtvrtek“ jsou nahrávky pouze pro díly 1–5. Pro rozsah 6+ je potřeba produkční WAV nebo vhodný audio výřez; nutný poslechový audit nástrojů, not a časování. |
 
 ## 2. Doporučený směr

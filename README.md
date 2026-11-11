@@ -49,7 +49,7 @@ Na Linuxu může být Tkinter potřeba doinstalovat z balíčků distribuce. Zvu
 - macOS: spusťte `packaging/build_macos.command`. Výsledkem je `dist/StarDanceSongSheet-macOS.dmg`.
 - GitHub Actions: workflow `Build desktop packages` sestaví oba cíle a přiloží EXE a DMG jako artefakty běhu. Tag `v*` nebo push na větev `release/v*` vytvoří GitHub Release s oběma instalátory.
 
-Windows a macOS balíčky se sestavují na příslušném systému v GitHub Actions. Aktuální EXE a DMG jsou v [GitHub Releases](https://github.com/lightingcze/StarDance_SongSheet_Studio/releases). Mac aplikace není podepsaná ani notarizovaná; Gatekeeper může při prvním spuštění zobrazit potvrzení. Windows EXE také není podepsané certifikátem vydavatele.
+Windows a macOS balíčky se sestavují na příslušném systému v GitHub Actions. Windows build je připnutý na runner `windows-2022`, protože skript používá generátor Visual Studio 2022 a novější `windows-latest` už nabízí Visual Studio 2026. Aktuální EXE a DMG jsou v [GitHub Releases](https://github.com/lightingcze/StarDance_SongSheet_Studio/releases). Mac aplikace není podepsaná ani notarizovaná; Gatekeeper může při prvním spuštění zobrazit potvrzení. Windows EXE také není podepsané certifikátem vydavatele.
 
 ## Použití
 

@@ -1,13 +1,7 @@
-.venv/
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
+.venv/
 build/
 dist/
-*.egg-info/
 *.spec
-.env
-.env.*
 .DS_Store
-Thumbs.db

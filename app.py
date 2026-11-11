@@ -15,10 +15,13 @@ import tkinter as tk
 import uuid
 import wave
 import csv
+import hashlib
 import urllib.request
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
 from typing import Any
+
+from midi_io import GM_PROGRAMS, load_midi, normalize_music_analysis, note_name, save_midi
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
@@ -48,6 +51,7 @@ DEFAULTS: dict[str, Any] = {
     "markers": [],
     "instrument_summary": "", "instrument_summary_short": "", "instrument_events": [],
     "instrument_activity": {"model": "YAMNet/AudioSet", "step": 0.48, "rows": []},
+    "music_analysis": {"schema_version": 1, "engine": "", "model": "", "tracks": []},
     "references": [], "accent": "#16A9A0", "dark": False,
     "show_waveform": True, "show_references": True,
 }
@@ -63,6 +67,12 @@ YAMNET_MODEL_URL = "https://huggingface.co/audiomagic/yamnet-onnx/resolve/main/y
 YAMNET_LABELS_URL = "https://huggingface.co/audiomagic/yamnet-onnx/resolve/main/yamnet_class_map.csv?download=true"
 YAMNET_HOP = 7680  # 0.48 s at 16 kHz, rounded to 25 fps in the UI.
 YAMNET_CHUNK = 491520  # 30.72 s, the fixed input used by the ONNX export.
+MUSCRIPTOR_MODELS = {
+    "small": {"bytes": 209_425_152, "sha256": "925f55af65a20ebc4f8b45ceaf095a12b72493d436cb112623cd0041a1af23d4"},
+    "medium": {"bytes": 618_442_496, "sha256": "3850cc9e5b436b17a09bd25b8f2615cb3366ab96a71e7b50f73a793a917fdf03"},
+    "large": {"bytes": 2_739_142_176, "sha256": "35a750fb1ab1e77195cdc2c0b9b4aeea2f4d59f11f729f02af9920c4854ef72e"},
+}
+MUSCRIPTOR_UPSTREAM_COMMIT = "8589219cc3b584bce970f95aec2ec4a04e53b280"
 
 
 def app_resource(relative: str) -> Path:
@@ -155,6 +165,60 @@ def _yamnet_cache_dir() -> Path:
     else:
         root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     return root / "StarDanceSongSheet" / "models"
+
+
+def _muscriptor_cache_dir() -> Path:
+    return _yamnet_cache_dir() / "muscriptor"
+
+
+def _download_muscriptor_weights(size: str, progress: Any = None, cancelled: Any = None) -> Path:
+    if size not in MUSCRIPTOR_MODELS:
+        raise ValueError(f"Neznámá velikost modelu MuScriptor: {size}")
+    info = MUSCRIPTOR_MODELS[size]
+    target = _muscriptor_cache_dir() / f"muscriptor-{size}-f16.gguf"
+    if target.exists() and target.stat().st_size == info["bytes"]:
+        digest = hashlib.sha256()
+        with target.open("rb") as model:
+            for chunk in iter(lambda: model.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() == info["sha256"]:
+            return target
+        target.unlink(missing_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(target.suffix + ".part")
+    url = f"https://huggingface.co/DamRsn/muscriptor-gguf/resolve/main/v1/muscriptor-{size}-f16.gguf?download=true"
+    request = urllib.request.Request(url, headers={"User-Agent": "StarDance-SongSheet-Studio/0.3"})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as output:
+            downloaded = 0
+            total = int(response.headers.get("Content-Length", str(info["bytes"])) or info["bytes"])
+            last_report = 0
+            while True:
+                if cancelled and cancelled():
+                    raise InterruptedError("Model download cancelled by user.")
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                downloaded += len(chunk)
+                if progress and downloaded - last_report >= 8 * 1024 * 1024:
+                    last_report = downloaded
+                    progress(f"Stahuji MuScriptor {size}: {downloaded / 1024**2:.0f} / {total / 1024**2:.0f} MB")
+        if partial.stat().st_size != info["bytes"]:
+            raise ValueError(f"Stažený model má nečekanou velikost ({partial.stat().st_size} B).")
+        digest = hashlib.sha256()
+        with partial.open("rb") as model:
+            for chunk in iter(lambda: model.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != info["sha256"]:
+            raise ValueError("Kontrolní součet modelu MuScriptor nesouhlasí; soubor nebyl použit.")
+        partial.replace(target)
+        if progress:
+            progress(f"Model MuScriptor {size} stažen a ověřen SHA-256.")
+        return target
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def _download_yamnet_asset(url: str, target: Path, progress: Any = None) -> None:
@@ -553,7 +617,10 @@ class PageRenderer:
             fp = app_resource(f"{FONT_DIR}/{name}")
             if not fp.exists():
                 fp = Path("/usr/share/fonts/truetype/dejavu") / name
-                self.fonts[key] = ImageFont.truetype(str(fp), self.px(size)) if fp.exists() else ImageFont.load_default()
+            try:
+                self.fonts[key] = ImageFont.truetype(str(fp), max(1, self.px(size))) if fp.exists() else ImageFont.load_default()
+            except OSError:
+                self.fonts[key] = ImageFont.load_default()
         return self.fonts[key]
 
     def wrap(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
@@ -812,6 +879,9 @@ class SongSheetApp:
         }
         self.root.configure(background=self.ui["bg"])
         self.state = json.loads(json.dumps(DEFAULTS))
+        self.edit_undo: list[str] = []
+        self.edit_redo: list[str] = []
+        self._edit_history_last = ""
         self.project_path: Path | None = None
         self.vars: dict[str, tk.StringVar] = {}
         self.text_widgets: dict[str, tk.Text] = {}
@@ -821,6 +891,7 @@ class SongSheetApp:
         self.pending_render: str | None = None
         self.analysis_queue: queue.Queue[tuple[bool, Any]] = queue.Queue()
         self.instrument_queue: queue.Queue[tuple[str, int, str, Any]] = queue.Queue()
+        self.music_queue: queue.Queue[tuple[int, str, Any]] = queue.Queue()
         self.playback_queue: queue.Queue[tuple[bool, Any]] = queue.Queue()
         self.playback_path: str | None = None
         self.playback_temp_path: str | None = None
@@ -838,16 +909,97 @@ class SongSheetApp:
         self.instrument_plot: tuple[int, int, int, int] = (148, 0, 0, 0)
         self.instrument_job_id = 0
         self.instrument_busy = False
+        self.music_job_id = 0
+        self.music_busy = False
+        self.music_worker_active = False
+        self.music_process: subprocess.Popen[str] | None = None
+        self.music_cancel_file: Path | None = None
         self.marker_drag_id: str | None = None
         self.selected_marker_id: str | None = None
         self._updating_slider = False
         self.audio_status = tk.StringVar(value="Načtěte zvukový soubor pro waveform a analýzu.")
         self.instrument_status_var = tk.StringVar(value="YAMNet/AudioSet: časová skóre se načtou po prvním spuštění analýzy.")
         self._build_ui()
+        self._reset_edit_history()
+        self.root.bind_all("<Control-z>", self._history_key_undo, add="+")
+        self.root.bind_all("<Control-y>", self._history_key_redo, add="+")
+        self.root.bind_all("<Control-Shift-Z>", self._history_key_redo, add="+")
+        if sys.platform == "darwin":
+            self.root.bind_all("<Command-z>", self._history_key_undo, add="+")
+            self.root.bind_all("<Command-Shift-Z>", self._history_key_redo, add="+")
         self.root.after(200, self._poll_analysis)
         self.root.after(50, self._poll_transport)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.schedule_preview()
+
+    def _edit_history_snapshot(self) -> str:
+        state = {
+            "music_analysis": self.state.get("music_analysis") or {"schema_version": 1, "tracks": []},
+            "markers": self.state.get("markers") or [],
+        }
+        return json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def _update_edit_history_buttons(self) -> None:
+        undo = getattr(self, "music_undo_button", None)
+        redo = getattr(self, "music_redo_button", None)
+        if undo is not None:
+            undo.configure(state="normal" if self.edit_undo else "disabled")
+        if redo is not None:
+            redo.configure(state="normal" if self.edit_redo else "disabled")
+
+    def _reset_edit_history(self) -> None:
+        self.edit_undo.clear()
+        self.edit_redo.clear()
+        self._edit_history_last = self._edit_history_snapshot()
+        self._update_edit_history_buttons()
+
+    def _record_edit_history(self) -> None:
+        current = self._edit_history_snapshot()
+        if self._edit_history_last and current != self._edit_history_last:
+            self.edit_undo.append(self._edit_history_last)
+            del self.edit_undo[:-80]
+            self.edit_redo.clear()
+        self._edit_history_last = current
+        self._update_edit_history_buttons()
+
+    def _step_edit_history(self, source: list[str], target: list[str]) -> bool:
+        if not source:
+            return False
+        target.append(self._edit_history_snapshot())
+        previous = json.loads(source.pop())
+        self.state["music_analysis"] = previous["music_analysis"]
+        self.state["markers"] = previous["markers"]
+        self._edit_history_last = self._edit_history_snapshot()
+        self.music_selected_note_id = None
+        self.selected_marker_id = None
+        self._refresh_music_tracks()
+        self._refresh_marker_table()
+        self._refresh_cue_text()
+        self.draw_music_roll()
+        self.draw_timeline()
+        self.schedule_preview()
+        self._update_edit_history_buttons()
+        return True
+
+    def undo_edit(self) -> bool:
+        return self._step_edit_history(self.edit_undo, self.edit_redo)
+
+    def redo_edit(self) -> bool:
+        return self._step_edit_history(self.edit_redo, self.edit_undo)
+
+    def _history_key_undo(self, _event: Any = None) -> str | None:
+        widget = self.root.focus_get()
+        if widget is not None and widget.winfo_class() in {"Entry", "TEntry", "Text", "TCombobox", "TSpinbox"}:
+            return None
+        self.undo_edit()
+        return "break"
+
+    def _history_key_redo(self, _event: Any = None) -> str | None:
+        widget = self.root.focus_get()
+        if widget is not None and widget.winfo_class() in {"Entry", "TEntry", "Text", "TCombobox", "TSpinbox"}:
+            return None
+        self.redo_edit()
+        return "break"
 
     def _build_ui(self) -> None:
         style = ttk.Style(self.root)
@@ -914,8 +1066,10 @@ class SongSheetApp:
         self.right_notebook.pack(fill="both", expand=True)
         print_tab = ttk.Frame(self.right_notebook, style="Workspace.TFrame")
         timeline_tab = ttk.Frame(self.right_notebook, style="Workspace.TFrame")
+        music_tab = ttk.Frame(self.right_notebook, style="Workspace.TFrame")
         self.right_notebook.add(print_tab, text="Tiskový náhled")
         self.right_notebook.add(timeline_tab, text="Audio a značky")
+        self.right_notebook.add(music_tab, text="Hudební mapa")
 
         preview_head = ttk.Frame(print_tab, padding=(18, 10), style="Workspace.TFrame")
         preview_head.pack(fill="x")
@@ -930,6 +1084,7 @@ class SongSheetApp:
         self.preview_canvas.pack(fill="both", expand=True)
         self.preview_canvas.bind("<Configure>", lambda _e: self.show_preview())
         self._build_timeline_ui(timeline_tab)
+        self._build_music_map_ui(music_tab)
 
     def _configure_ui_style(self, style: ttk.Style) -> None:
         c = self.ui
@@ -1085,6 +1240,829 @@ class SongSheetApp:
         self.marker_tree.bind("<<TreeviewSelect>>", self._marker_selected)
         self.marker_tree.bind("<Double-1>", self._edit_marker_cell)
 
+    def _build_music_map_ui(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent, padding=(14, 12), style="Workspace.TFrame")
+        toolbar.pack(fill="x")
+        ttk.Label(toolbar, text="NOTOVÁ MAPA · MIDI / AI PŘEPIS", style="Eyebrow.TLabel").pack(anchor="w")
+        actions = ttk.Frame(toolbar, style="Workspace.TFrame")
+        actions.pack(fill="x", pady=(7, 0))
+        ttk.Button(actions, text="Načíst MIDI", command=self.import_music_midi, style="Primary.TButton").pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="Export MIDI", command=self.export_music_midi).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="Export CSV", command=self.export_music_csv).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="Export mapa PNG", command=self.export_music_map_png).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="＋ Nota", command=self.add_music_note).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="− Odebrat notu", command=self.remove_music_note, style="Quiet.TButton").pack(side="left", padx=(0, 12))
+        self.music_undo_button = ttk.Button(actions, text="↶ Zpět", command=self.undo_edit, state="disabled")
+        self.music_undo_button.pack(side="left", padx=(0, 5))
+        self.music_redo_button = ttk.Button(actions, text="↷ Znovu", command=self.redo_edit, state="disabled")
+        self.music_redo_button.pack(side="left", padx=(0, 8))
+        ttk.Label(actions, text="Stopa", style="Field.TLabel").pack(side="left", padx=(4, 4))
+        self.music_track_var = tk.StringVar(value="")
+        self.music_track_picker = ttk.Combobox(actions, textvariable=self.music_track_var, state="readonly", width=24, values=())
+        self.music_track_picker.pack(side="left")
+        self.music_track_picker.bind("<<ComboboxSelected>>", self._music_track_selected)
+        ttk.Label(actions, text="Mapa", style="Field.TLabel").pack(side="left", padx=(10, 4))
+        self.music_filter_var = tk.StringVar(value="Všechny stopy")
+        self.music_filter_picker = ttk.Combobox(actions, textvariable=self.music_filter_var, state="readonly", width=16,
+                                                 values=("Všechny stopy", "Jen vybraná"))
+        self.music_filter_picker.pack(side="left")
+        self.music_filter_picker.bind("<<ComboboxSelected>>", lambda _event: self.draw_music_roll())
+        self.music_zoom = 1.0
+        ttk.Button(actions, text="−", width=3, command=lambda: self._set_music_zoom(self.music_zoom / 1.25)).pack(side="right", padx=(4, 0))
+        ttk.Button(actions, text="＋", width=3, command=lambda: self._set_music_zoom(self.music_zoom * 1.25)).pack(side="right")
+        ai_tools = ttk.Frame(toolbar, style="Workspace.TFrame")
+        ai_tools.pack(fill="x", pady=(7, 0))
+        self.music_analyze_button = ttk.Button(ai_tools, text="♫  AI přepis celé skladby", command=self.analyze_music_notes, style="Primary.TButton")
+        self.music_analyze_button.pack(side="left", padx=(0, 6))
+        self.music_model_var = tk.StringVar(value="medium")
+        self.music_model_picker = ttk.Combobox(ai_tools, textvariable=self.music_model_var, state="readonly", width=15,
+                                                values=("small · 209 MB", "medium · 618 MB", "large · 2,7 GB"))
+        self.music_model_picker.current(1)
+        self.music_model_picker.pack(side="left", padx=(0, 6))
+        ttk.Button(ai_tools, text="✦ LD návrhy z not", command=self.generate_music_cues).pack(side="left", padx=(0, 6))
+        self.music_cancel_button = ttk.Button(ai_tools, text="Zrušit", command=self.cancel_music_analysis, state="disabled", style="Quiet.TButton")
+        self.music_cancel_button.pack(side="left", padx=(0, 8))
+        self.music_ai_status_var = tk.StringVar(value="Lokální MuScriptor. Audio se zpracovává pouze na tomto počítači.")
+        ttk.Label(ai_tools, textvariable=self.music_ai_status_var, wraplength=540, justify="left", style="Muted.TLabel").pack(side="left", fill="x", expand=True)
+        self.music_status_var = tk.StringVar(value="Načtěte MIDI nebo použijte lokální nástroj pro přepis a otevřete jeho MIDI výstup.")
+        ttk.Label(parent, textvariable=self.music_status_var, wraplength=900, justify="left", style="Info.TLabel").pack(fill="x", padx=14, pady=(0, 8))
+
+        roll = ttk.Frame(parent, style="Workspace.TFrame")
+        roll.pack(fill="both", expand=True, padx=12)
+        self.music_roll_canvas = tk.Canvas(roll, height=390, background="#101A1F", highlightthickness=0, scrollregion=(0, 0, 1400, 500))
+        xscroll = ttk.Scrollbar(roll, orient="horizontal", command=self.music_roll_canvas.xview)
+        yscroll = ttk.Scrollbar(roll, orient="vertical", command=self.music_roll_canvas.yview)
+        self.music_roll_canvas.configure(xscrollcommand=xscroll.set, yscrollcommand=yscroll.set)
+        self.music_roll_canvas.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        roll.rowconfigure(0, weight=1)
+        roll.columnconfigure(0, weight=1)
+        self.music_roll_canvas.bind("<Configure>", lambda _e: self.draw_music_roll())
+        self.music_roll_canvas.bind("<Button-1>", self._music_roll_press)
+        self.music_roll_canvas.bind("<B1-Motion>", self._music_roll_drag)
+        self.music_roll_canvas.bind("<ButtonRelease-1>", self._music_roll_release)
+
+        notes = ttk.Frame(parent, padding=(12, 9, 12, 12), style="Panel.TFrame")
+        notes.pack(fill="x")
+        ttk.Label(notes, text="VYBRANÁ STOPA · EDITOVATELNÉ NOTY", style="Eyebrow.TLabel").pack(anchor="w", pady=(0, 5))
+        columns = ("pitch", "start", "end", "velocity")
+        self.music_note_tree = ttk.Treeview(notes, columns=columns, show="headings", height=6, selectmode="browse")
+        for key, label, width in (("pitch", "Nota", 120), ("start", "Nástup · s", 140), ("end", "Konec · s", 140), ("velocity", "Velocity", 100)):
+            self.music_note_tree.heading(key, text=label)
+            self.music_note_tree.column(key, width=width, anchor="center")
+        self.music_note_tree.pack(fill="x", expand=True)
+        self.music_note_tree.bind("<<TreeviewSelect>>", self._music_note_selected)
+        self.music_note_tree.bind("<Double-1>", self._edit_music_note_cell)
+        ttk.Label(parent, text="Tažením změňte výšku nebo začátek noty; uchopte pravý okraj pro změnu délky. Mřížka je vodítko, noty se automaticky nepřichytávají.", style="Muted.TLabel", wraplength=920).pack(anchor="w", padx=16, pady=(0, 10))
+        ttk.Label(parent, text="Modelové váhy CC BY-NC 4.0 · stahují se jen po stisknutí AI přepisu. Model neodhaduje BPM, velocity ani jistotu jednotlivých not; výsledky ověřte poslechem.", style="Warning.TLabel", wraplength=920, justify="left").pack(fill="x", padx=14, pady=(0, 10))
+
+    def _selected_music_model(self) -> str:
+        value = self.music_model_var.get().split("·", 1)[0].strip().lower()
+        return value if value in MUSCRIPTOR_MODELS else "medium"
+
+    def _muscriptor_executable(self) -> Path | None:
+        executable = "muscriptor_cli.exe" if os.name == "nt" else "muscriptor_cli"
+        candidates = [
+            app_resource(str(Path("native") / executable)),
+            Path(__file__).resolve().parent / "build" / "muscriptor" / "bin" / executable,
+            Path(__file__).resolve().parent / "build" / "muscriptor" / "bin" / "Release" / executable,
+        ]
+        return next((path for path in candidates if path.is_file()), None)
+
+    def analyze_music_notes(self) -> None:
+        audio_path = str(self.state.get("audio_path", ""))
+        if not audio_path or not Path(audio_path).exists():
+            messagebox.showinfo("AI přepis", "Nejprve načtěte skutečnou produkční nahrávku.")
+            return
+        if self.music_busy:
+            return
+        if self.music_worker_active or self.music_process is not None:
+            messagebox.showinfo("MuScriptor", "Čekám, až se zastaví předchozí analýza.")
+            return
+        executable = self._muscriptor_executable()
+        if executable is None:
+            messagebox.showinfo("MuScriptor engine", "Lokální C++ engine není v tomto zdrojovém běhu sestaven. Použijte packaging/build_macos.command nebo packaging/build_windows.ps1; hotová aplikace obsahuje nativní engine.")
+            self.music_ai_status_var.set("MuScriptor engine chybí; MIDI import a ruční editor zůstávají dostupné.")
+            return
+        size = self._selected_music_model()
+        expected_weights = _muscriptor_cache_dir() / f"muscriptor-{size}-f16.gguf"
+        if not expected_weights.exists() and not messagebox.askyesno(
+            "Licence modelu MuScriptor",
+            "Zvolená modelová váha se stáhne do místní cache a poběží na tomto počítači. Je licencována CC BY-NC 4.0, která povoluje pouze nekomerční použití. Audio se nikam neposílá. Pokračovat ve stažení?",
+        ):
+            return
+        current = self.state.get("music_analysis") or {}
+        can_resume = bool(current.get("resume_point") and current.get("source_audio") == audio_path and current.get("model_size") == size)
+        if current.get("tracks") and not can_resume and not messagebox.askyesno("Nahradit notový přepis", "Nová analýza nahradí současnou notovou mapu. Pokračovat?"):
+            return
+        if not can_resume:
+            self.state["music_analysis"] = {"schema_version": 1, "engine": "MuScriptor.cpp", "model": f"muscriptor-{size}-f16", "model_size": size,
+                                             "source_audio": audio_path, "sample_rate": 16000, "progress": 0.0, "tracks": []}
+        self._reset_edit_history()
+        resume_point = str(current.get("resume_point", "")) if can_resume else ""
+        self.music_job_id += 1
+        token = self.music_job_id
+        self.music_busy = True
+        self.music_worker_active = True
+        self.music_analyze_button.configure(state="disabled")
+        self.music_model_picker.configure(state="disabled")
+        self.music_cancel_button.configure(state="normal")
+        self.music_ai_status_var.set(f"Připravuji lokální přepis MuScriptor · {size}. Při prvním použití se stáhne model a ověří SHA-256.")
+        self.music_cancel_file = _muscriptor_cache_dir() / f"cancel-{token}.flag"
+        self.music_cancel_file.parent.mkdir(parents=True, exist_ok=True)
+        self.music_cancel_file.unlink(missing_ok=True)
+        threading.Thread(target=self._music_analysis_worker, args=(audio_path, size, resume_point, token, executable, self.music_cancel_file), daemon=True).start()
+
+    def cancel_music_analysis(self) -> None:
+        if self.music_cancel_file:
+            try:
+                self.music_cancel_file.parent.mkdir(parents=True, exist_ok=True)
+                self.music_cancel_file.write_text("cancel", encoding="ascii")
+                self.music_ai_status_var.set("Ruším přepis. Hotové pětisekundové bloky zůstávají uložené a lze pokračovat později.")
+                self.music_cancel_button.configure(state="disabled")
+            except OSError as exc:
+                messagebox.showerror("Zrušení přepisu", str(exc))
+
+    def _invalidate_music_analysis(self) -> None:
+        if not self.music_busy:
+            return
+        self.cancel_music_analysis()
+        self.music_job_id += 1
+        self.music_busy = False
+        self.music_analyze_button.configure(state="normal")
+        self.music_model_picker.configure(state="readonly")
+        self.music_cancel_button.configure(state="disabled")
+
+    def _music_analysis_worker(self, audio_path: str, size: str, resume_point: str, token: int, executable: Path, cancel_file: Path) -> None:
+        raw_path = None
+        resume_path = None
+        try:
+            weights = _download_muscriptor_weights(size, progress=lambda message: self.music_queue.put((token, "progress", {"message": message})),
+                                                    cancelled=cancel_file.exists)
+            if cancel_file.exists():
+                self.music_queue.put((token, "cancelled", {"message": "Přepis zrušen před spuštěním modelu."}))
+                return
+            ffmpeg = ffmpeg_executable()
+            if not ffmpeg:
+                raise RuntimeError("Dekodér FFmpeg není dostupný pro převod audia na 16 kHz mono.")
+            handle = tempfile.NamedTemporaryFile(prefix="stardance_muscriptor_", suffix=".f32", delete=False)
+            raw_path = Path(handle.name)
+            handle.close()
+            self.music_queue.put((token, "progress", {"message": "Převádím zdrojové audio na mono float32 / 16 kHz; soubor zůstává lokálně."}))
+            command = [ffmpeg, "-y", "-v", "error", "-i", audio_path, "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-c:a", "pcm_f32le", str(raw_path)]
+            converted = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
+            if converted.returncode != 0:
+                lines = converted.stderr.decode("utf-8", "replace").strip().splitlines()
+                raise RuntimeError(lines[-1] if lines else "FFmpeg nepřevedl zvuk pro MuScriptor.")
+            if cancel_file.exists():
+                self.music_queue.put((token, "cancelled", {"message": "Přepis zrušen před spuštěním modelu."}))
+                return
+            args = [str(executable), "--weights", str(weights), "--input-f32", str(raw_path), "--cancel-file", str(cancel_file)]
+            if resume_point:
+                saved = tempfile.NamedTemporaryFile(prefix="stardance_muscriptor_resume_", suffix=".txt", delete=False)
+                resume_path = Path(saved.name)
+                with saved:
+                    saved.write(resume_point.encode("utf-8"))
+                args.extend(["--resume-file", str(resume_path)])
+            thread_count = max(1, min(8, (os.cpu_count() or 4) - 2))
+            args.extend(["--threads", str(thread_count)])
+            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1)
+            self.music_process = process
+            stderr_lines: list[str] = []
+            native_error = ""
+            def collect_stderr() -> None:
+                if process.stderr:
+                    for line in process.stderr:
+                        if line.strip():
+                            stderr_lines.append(line.strip())
+            stderr_thread = threading.Thread(target=collect_stderr, daemon=True)
+            stderr_thread.start()
+            if process.stdout:
+                for line in process.stdout:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") == "error":
+                        native_error = str(event.get("message", "MuScriptor selhal."))
+                        continue
+                    self.music_queue.put((token, "event", event))
+            return_code = process.wait()
+            stderr_thread.join(timeout=2)
+            if return_code == 0:
+                self.music_queue.put((token, "finished", {"backend": "", "device": "", "return_code": 0}))
+            elif return_code == 3:
+                self.music_queue.put((token, "cancelled", {"message": "Analýza přerušena; lze pokračovat od posledního hotového bloku."}))
+            elif return_code != 0:
+                detail = native_error or (stderr_lines[-1] if stderr_lines else f"MuScriptor skončil s kódem {return_code}.")
+                self.music_queue.put((token, "failed", {"message": detail}))
+        except InterruptedError:
+            self.music_queue.put((token, "cancelled", {"message": "Stažení modelu zrušeno."}))
+        except Exception as exc:
+            self.music_queue.put((token, "failed", {"message": str(exc)}))
+        finally:
+            if raw_path:
+                raw_path.unlink(missing_ok=True)
+            if resume_path:
+                resume_path.unlink(missing_ok=True)
+            try:
+                cancel_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.music_process = None
+            self.music_worker_active = False
+
+    def _append_music_events(self, payload: dict[str, Any]) -> None:
+        analysis = self.state.setdefault("music_analysis", {"schema_version": 1, "tracks": []})
+        for raw in payload.get("notes") or []:
+            try:
+                program = max(0, min(128, int(raw.get("program", 0))))
+                is_drum = bool(raw.get("is_drum")) or program == 128
+                instrument_key = str(raw.get("instrument") or ("drums" if is_drum else f"program_{program}"))
+                name = "Bicí/perkuse" if is_drum else (GM_PROGRAMS[program] if program < len(GM_PROGRAMS) else instrument_key.replace("_", " ").title())
+                track = next((part for part in analysis.setdefault("tracks", []) if part.get("instrument_key") == instrument_key and int(part.get("program", 0)) == program), None)
+                if track is None:
+                    track = {"id": uuid.uuid4().hex, "name": name, "program": program, "program_name": name,
+                             "channel": 9 if is_drum else program % 9, "is_drum": is_drum, "instrument_key": instrument_key, "notes": []}
+                    analysis["tracks"].append(track)
+                onset, offset = float(raw.get("onset", 0)), float(raw.get("offset", 0))
+                track["notes"].append({"id": uuid.uuid4().hex, "pitch": max(0, min(127, int(raw.get("pitch", 60)))),
+                                       "start": max(0.0, onset), "end": max(onset + .03, offset), "velocity": 96,
+                                       "velocity_source": "výchozí hodnota při exportu MIDI; model velocity neodhaduje", "manual": False})
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if payload.get("resume_point"):
+            analysis["resume_point"] = payload["resume_point"]
+        analysis["progress"] = max(float(analysis.get("progress", 0) or 0), float(payload.get("progress", 0) or 0))
+        analysis["source_audio"] = str(self.state.get("audio_path", ""))
+        analysis["model_size"] = self._selected_music_model()
+
+    def _poll_music_analysis(self) -> None:
+        try:
+            while True:
+                token, phase, payload = self.music_queue.get_nowait()
+                if token != self.music_job_id:
+                    continue
+                if phase == "progress":
+                    self.music_ai_status_var.set(str(payload.get("message", "MuScriptor pracuje lokálně…")))
+                elif phase == "event":
+                    kind = payload.get("type")
+                    if kind == "chunk":
+                        self._append_music_events(payload)
+                        percent = float(payload.get("progress", 0) or 0) * 100
+                        count = sum(len(track.get("notes") or []) for track in (self.state.get("music_analysis") or {}).get("tracks", []))
+                        self.music_ai_status_var.set(f"MuScriptor · {percent:.0f}% skladby · {count} not · {payload.get('finalized_through', 0):.1f} s hotovo")
+                        self._refresh_music_tracks()
+                        self.draw_music_roll()
+                    elif kind == "loading":
+                        self.music_ai_status_var.set(f"Načítám ověřený model MuScriptor · {float(payload.get('progress', 0)) * 100:.0f}%")
+                    elif kind == "done":
+                        analysis = self.state.setdefault("music_analysis", {})
+                        analysis.update({"engine": "MuScriptor.cpp", "backend": payload.get("backend", ""), "device": payload.get("device", ""),
+                                         "duration": payload.get("duration", 0), "sample_rate": 16000, "progress": 1.0})
+                elif phase == "finished":
+                    analysis = self.state.setdefault("music_analysis", {})
+                    analysis.update({"engine": "MuScriptor.cpp", "model": f"muscriptor-{analysis.get('model_size', 'medium')}-f16", "progress": 1.0})
+                    analysis.pop("resume_point", None)
+                    self.music_ai_status_var.set(f"Hotovo · {sum(len(t.get('notes') or []) for t in analysis.get('tracks', []))} not · {analysis.get('device') or analysis.get('backend') or 'lokální engine'} · ověřte poslechem.")
+                    self._refresh_music_tracks()
+                    self.draw_music_roll()
+                    self.music_busy = False
+                    self.music_analyze_button.configure(state="normal")
+                    self.music_model_picker.configure(state="readonly")
+                    self.music_cancel_button.configure(state="disabled")
+                    self.audio_status.set("MuScriptor dokončil notový přepis celé skladby; výsledek je editovatelný a lokálně uložitelný.")
+                    self._reset_edit_history()
+                elif phase == "cancelled":
+                    self.music_ai_status_var.set(str(payload.get("message", "Přepis zrušen.")))
+                    self.music_busy = False
+                    self.music_analyze_button.configure(state="normal")
+                    self.music_model_picker.configure(state="readonly")
+                    self.music_cancel_button.configure(state="disabled")
+                    self._refresh_music_tracks()
+                    self.draw_music_roll()
+                    self._reset_edit_history()
+                elif phase == "failed":
+                    self.music_ai_status_var.set("Přepis selhal; hotové bloky zůstávají zachovány.")
+                    self.music_busy = False
+                    self.music_analyze_button.configure(state="normal")
+                    self.music_model_picker.configure(state="readonly")
+                    self.music_cancel_button.configure(state="disabled")
+                    messagebox.showerror("MuScriptor", str(payload.get("message", "Neznámá chyba.")))
+        except queue.Empty:
+            pass
+
+    def import_music_midi(self) -> None:
+        if self.music_worker_active:
+            messagebox.showinfo("Import MIDI", "Počkejte na zastavení nebo dokončení běžícího MuScriptoru.")
+            return
+        path = filedialog.askopenfilename(title="Načíst notový přepis jako MIDI", filetypes=[("Standard MIDI", "*.mid *.midi"), ("Všechny soubory", "*.*")])
+        if not path:
+            return
+        if (self.state.get("music_analysis") or {}).get("tracks") and not messagebox.askyesno("Nahradit notovou mapu", "MIDI nahradí současné notové stopy. Pokračovat?"):
+            return
+        try:
+            result = load_midi(path)
+            self.state["music_analysis"] = normalize_music_analysis(result)
+            self._record_edit_history()
+            duration = float(result.get("duration", 0) or 0)
+            if duration and self.duration_seconds() <= 0:
+                self.state["duration"] = duration
+                self.vars["duration"].set(display_time(duration))
+            self._refresh_music_tracks()
+            self.draw_music_roll()
+            self._update_scale_range()
+            self.audio_status.set(f"Načteno MIDI: {Path(path).name} · {len(result['tracks'])} stop · {sum(len(t['notes']) for t in result['tracks'])} not")
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("Import MIDI", str(exc))
+
+    def export_music_midi(self) -> None:
+        analysis = normalize_music_analysis(self.state.get("music_analysis"))
+        if not analysis.get("tracks"):
+            messagebox.showinfo("Export MIDI", "Nejprve načtěte MIDI nebo přidejte noty.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".mid", filetypes=[("Standard MIDI", "*.mid")], title="Exportovat vícestopé MIDI")
+        if not path:
+            return
+        try:
+            bpm = float(self.vars["bpm"].get() or 120)
+            save_midi(path, analysis, bpm)
+            self.music_status_var.set(f"Vícestopé MIDI exportováno: {Path(path).name} · {len(analysis['tracks'])} stop")
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("Export MIDI", str(exc))
+
+    def export_music_csv(self) -> None:
+        analysis = normalize_music_analysis(self.state.get("music_analysis"))
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")], title="Exportovat noty do CSV")
+        if not path:
+            return
+        try:
+            with Path(path).open("w", newline="", encoding="utf-8-sig") as file:
+                writer = csv.writer(file)
+                writer.writerow(("track", "program", "pitch", "note", "start_seconds", "end_seconds", "velocity", "manual"))
+                for track in analysis["tracks"]:
+                    for note in track["notes"]:
+                        writer.writerow((track["name"], track["program_name"], note["pitch"], note_name(note["pitch"]),
+                                         f"{note['start']:.6f}", f"{note['end']:.6f}", note["velocity"], note["manual"]))
+            self.music_status_var.set(f"Tabulka not exportována: {Path(path).name}")
+        except OSError as exc:
+            messagebox.showerror("Export CSV", str(exc))
+
+    def export_music_map_png(self) -> None:
+        tracks = self._visible_music_tracks()
+        if not any(track.get("notes") for track in tracks):
+            messagebox.showinfo("Export hudební mapy", "Nejprve načtěte MIDI nebo spusťte MuScriptor přepis.")
+            return
+        title = str(self.state.get("metadata", {}).get("title") or "song-sheet")
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", title).strip(" .-") or "song-sheet"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png", filetypes=[("PNG", "*.png")],
+            title="Exportovat piano roll jako PNG",
+            initialfile=f"{stem}-hudebni-mapa.png",
+        )
+        if not path:
+            return
+        try:
+            duration = max(self.duration_seconds(), max((float(n.get("end", 0)) for t in tracks for n in t.get("notes", [])), default=0), 12.0)
+            zoom = float(getattr(self, "music_zoom", 1.0))
+            base_width = 150 + duration * 70 * zoom + 30
+            base_height = 74 + max(1, len(tracks)) * 166 + 30
+            scale = min(1.0, 14000 / base_width, 9000 / base_height, math.sqrt(24_000_000 / (base_width * base_height)))
+            left, top, lane, pitch_height = 136 * scale, 62 * scale, 166 * scale, 112 * scale
+            px_per_second = 70 * zoom * scale
+            width = max(720, math.ceil(150 * scale + duration * px_per_second + 30 * scale))
+            height = max(280, math.ceil(74 * scale + max(1, len(tracks)) * lane + 30 * scale))
+            image = Image.new("RGB", (width, height), "#101A1F")
+            draw = ImageDraw.Draw(image)
+            renderer = PageRenderer(self.state, quality="print")
+            title_font = renderer.font(max(10, round(18 * scale)), True)
+            label_font = renderer.font(max(8, round(12 * scale)), True)
+            small_font = renderer.font(max(8, round(9 * scale)))
+            draw.text((left, 8 * scale), str(self.state.get("metadata", {}).get("title") or "Hudební mapa"), fill="#E8EEF0", font=title_font)
+            draw.text((left, 31 * scale), f"{duration:.2f} s · {len(tracks)} stop · notová aktivita odvozená z přepisu · časové značky LD používají 25 fps", fill="#9CABB2", font=small_font)
+            try:
+                bpm = max(1.0, float(self.vars["bpm"].get() or 120))
+            except (ValueError, TypeError):
+                bpm = 120.0
+            beat = 60.0 / bpm
+            plot_right = width - 10 * scale
+            for index in range(int(duration / beat) + 2):
+                x = left + index * beat * px_per_second
+                if x > plot_right:
+                    break
+                strong = index % 4 == 0
+                draw.line((x, top - 12 * scale, x, height - 23 * scale), fill="#35474E" if strong else "#202F35", width=max(1, round(scale)))
+                if strong:
+                    draw.text((x + 3 * scale, 45 * scale), str(index // 4 + 1), fill="#A4B4BA", font=small_font)
+            palette = ["#2BB8AD", "#82AAF1", "#F0BD5A", "#C58CE6", "#EF7F78", "#73C68B", "#62BDE2", "#D39568"]
+            for ti, track in enumerate(tracks):
+                y = top + ti * lane
+                color = palette[ti % len(palette)]
+                draw.rectangle((0, y, left - 3, y + lane - 3), fill="#17242A", outline="#2B3D44")
+                draw.text((10 * scale, y + 8 * scale), str(track.get("name") or "Instrument")[:22], fill="#D8E4E7", font=label_font)
+                draw.text((10 * scale, y + 25 * scale), str(track.get("program_name") or "MIDI track")[:24], fill="#91A2A8", font=small_font)
+                draw.text((10 * scale, y + 43 * scale), "NOTOVÁ AKTIVITA", fill="#80949B", font=small_font)
+                notes = track.get("notes") or []
+                bins = min(160, max(1, int(duration / .5)))
+                counts = [0] * bins
+                for note in notes:
+                    a = max(0, min(bins - 1, int(float(note.get("start", 0)) / duration * bins)))
+                    b = max(a, min(bins - 1, int(float(note.get("end", 0)) / duration * bins)))
+                    for bi in range(a, b + 1):
+                        counts[bi] += 1
+                peak = max(counts, default=0)
+                ribbon_top = y + 58 * scale
+                if peak:
+                    bw = (plot_right - left) / bins
+                    for bi, count in enumerate(counts):
+                        if count:
+                            bar_h = (3 + 11 * count / peak) * scale
+                            draw.rectangle((left + bi * bw, ribbon_top + 13 * scale - bar_h,
+                                            left + (bi + 1) * bw + 1, ribbon_top + 13 * scale), fill=color)
+                low, high = self._music_pitch_range(track)
+                usable = pitch_height - 8 * scale
+                row_h = usable / max(1, high - low + 1)
+                grid_top, grid_bottom = y + 60 * scale, y + 60 * scale + usable
+                draw.rectangle((left, grid_top, plot_right, grid_bottom), fill="#121E23", outline="#34464D")
+                for pitch in range(low, high + 1):
+                    py = grid_bottom - (pitch - low + .5) * row_h
+                    if pitch % 12 == 0:
+                        draw.line((left, py, plot_right, py), fill="#43565D")
+                        draw.text((left - 5 * scale, py), note_name(pitch), fill="#8FA0A6", font=small_font, anchor="rm")
+                    elif pitch % 2 == 0:
+                        draw.line((left, py, plot_right, py), fill="#202F35")
+                for note in notes:
+                    pitch = max(low, min(high, int(note.get("pitch", 60))))
+                    x0 = left + max(0.0, float(note.get("start", 0))) * px_per_second
+                    x1 = left + max(float(note.get("start", 0)) + .03, float(note.get("end", 0))) * px_per_second
+                    cy = grid_bottom - (pitch - low + .5) * row_h
+                    half = max(2 * scale, row_h * .36)
+                    draw.rounded_rectangle((x0, cy - half, max(x0 + 4 * scale, x1), cy + half), radius=max(2, round(2 * scale)), fill=color, outline="#E8FFFC" if note.get("manual") else "#183A3A", width=max(1, round(scale)))
+                draw.line((0, y + lane - 2 * scale, plot_right, y + lane - 2 * scale), fill="#35474E")
+            playhead_x = left + max(0, self.current_position) * px_per_second
+            draw.line((playhead_x, top - 7 * scale, playhead_x, height - 24 * scale), fill="#FF6572", width=max(2, round(2 * scale)))
+            image.save(path, format="PNG", dpi=(150, 150), optimize=True)
+            self.music_status_var.set(f"Hudební mapa exportována: {Path(path).name} · {width} × {height} px")
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("Export hudební mapy", str(exc))
+
+    def generate_music_cues(self) -> None:
+        tracks = self._music_tracks()
+        if not tracks:
+            messagebox.showinfo("Návrhy LD", "Nejprve načtěte MIDI nebo spusťte MuScriptor přepis.")
+            return
+        existing = self.state.setdefault("markers", [])
+        candidates = []
+        for track in self._visible_music_tracks():
+            notes = sorted(track.get("notes") or [], key=lambda n: float(n.get("start", 0)))
+            if not notes:
+                continue
+            name = str(track.get("name") or track.get("program_name") or "instrument")
+            starts = []
+            last = None
+            for note in notes:
+                onset = float(note.get("start", 0))
+                if last is None or onset - last >= 1.25:
+                    starts.append((onset, "Nástup instrumentální vrstvy", f"Nástup {name}"))
+                last = float(note.get("end", onset))
+            for onset, kind, label in starts[:12]:
+                candidates.append((onset, kind, label, name))
+            duration = max((float(note.get("end", 0)) for note in notes), default=0.0)
+            bins = max(1, int(duration) + 1)
+            counts = [0] * bins
+            for note in notes:
+                index = min(bins - 1, max(0, int(float(note.get("start", 0)))))
+                counts[index] += 1
+            added_fills = 0
+            for index, count in enumerate(counts):
+                previous = counts[index - 1] if index else 0
+                if count >= 6 and count >= max(4, previous * 1.7):
+                    candidates.append((float(index), "Hudební změna", f"Možný hustý fill · {name}", name))
+                    added_fills += 1
+                    if added_fills >= 5:
+                        break
+        added = 0
+        for seconds, kind, label, instrument in sorted(candidates, key=lambda row: row[0]):
+            timecode = round(max(0.0, seconds) * FPS) / FPS
+            if any(str(marker.get("instrument", "")) == instrument and abs(float(marker.get("time", 0)) - timecode) < .35 for marker in existing):
+                continue
+            existing.append({"id": uuid.uuid4().hex, "label": label, "time": timecode, "kind": "Nástroj", "instrument": instrument,
+                             "evidence": f"{kind}; odvozeno z notového přepisu, ověřit poslechem", "source": "MuScriptor / piano roll · návrh"})
+            added += 1
+        self._record_edit_history()
+        self._refresh_marker_table()
+        self._refresh_cue_text()
+        self.draw_timeline()
+        self.schedule_preview()
+        self.music_ai_status_var.set(f"Přidáno {added} editovatelných LD kandidátů. Jde o odvozené návrhy, ne potvrzené GO.")
+
+    def _music_tracks(self) -> list[dict[str, Any]]:
+        analysis = self.state.setdefault("music_analysis", {"schema_version": 1, "tracks": []})
+        analysis["tracks"] = analysis.get("tracks") or []
+        return analysis["tracks"]
+
+    def _refresh_music_tracks(self) -> None:
+        if not hasattr(self, "music_track_picker"):
+            return
+        tracks = self._music_tracks()
+        previous = self.music_track_var.get()
+        self.music_track_ids = [str(track.get("id", "")) for track in tracks]
+        labels = [f"{track.get('name') or 'Instrument'} · {len(track.get('notes') or [])} not" for track in tracks]
+        self.music_track_picker.configure(values=labels)
+        if previous in labels:
+            self.music_track_picker.current(labels.index(previous))
+        elif labels:
+            self.music_track_picker.current(0)
+        else:
+            self.music_track_var.set("")
+        self._refresh_music_note_table()
+
+    def _selected_music_track(self) -> dict[str, Any] | None:
+        tracks = self._music_tracks()
+        index = self.music_track_picker.current() if hasattr(self, "music_track_picker") else -1
+        return tracks[index] if 0 <= index < len(tracks) else None
+
+    def _visible_music_tracks(self) -> list[dict[str, Any]]:
+        tracks = self._music_tracks()
+        if getattr(self, "music_filter_var", None) is not None and self.music_filter_var.get() == "Jen vybraná":
+            selected = self._selected_music_track()
+            return [selected] if selected else []
+        return tracks
+
+    def _music_track_selected(self, _event: Any = None) -> None:
+        self._refresh_music_note_table()
+        self.draw_music_roll()
+
+    def _refresh_music_note_table(self) -> None:
+        tree = getattr(self, "music_note_tree", None)
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        track = self._selected_music_track()
+        if not track:
+            return
+        notes = sorted(track.get("notes") or [], key=lambda n: (float(n.get("start", 0)), int(n.get("pitch", 60))))
+        selected = getattr(self, "music_selected_note_id", None)
+        for note in notes[:5000]:
+            note_id = str(note.setdefault("id", uuid.uuid4().hex))
+            tree.insert("", "end", iid=note_id, values=(note_name(note.get("pitch", 60)), f"{float(note.get('start', 0)):.3f}",
+                                                          f"{float(note.get('end', 0)):.3f}", int(note.get("velocity", 96))))
+        if selected and tree.exists(selected):
+            tree.selection_set(selected)
+            tree.see(selected)
+
+    def _set_music_zoom(self, value: float) -> None:
+        self.music_zoom = max(0.3, min(8.0, float(value)))
+        self.draw_music_roll()
+
+    def _music_pitch_range(self, track: dict[str, Any]) -> tuple[int, int]:
+        pitches = [max(0, min(127, int(n.get("pitch", 60)))) for n in (track.get("notes") or [])]
+        if not pitches:
+            return 48, 84
+        low, high = min(pitches), max(pitches)
+        if high - low < 24:
+            mid = (high + low) / 2
+            low, high = math.floor(mid - 12), math.ceil(mid + 12)
+        low = max(0, low - 2)
+        high = min(127, max(high + 2, low + 24))
+        return low, high
+
+    def draw_music_roll(self) -> None:
+        canvas = getattr(self, "music_roll_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        tracks = self._visible_music_tracks()
+        self.music_note_boxes: list[dict[str, Any]] = []
+        left, top = 136, 31
+        lane_height, pitch_height = 166, 112
+        duration = self.duration_seconds()
+        if duration <= 0:
+            duration = max((float(n.get("end", 0)) for t in tracks for n in (t.get("notes") or [])), default=12.0)
+        px_per_second = 70 * getattr(self, "music_zoom", 1.0)
+        plot_width = max(canvas.winfo_width() - left - 30, int(duration * px_per_second))
+        height = max(canvas.winfo_height(), top + max(1, len(tracks)) * lane_height + 30)
+        canvas.configure(scrollregion=(0, 0, left + plot_width + 30, height))
+        canvas.create_rectangle(0, 0, left + plot_width + 30, height, fill="#101A1F", outline="")
+        bpm = 120.0
+        try:
+            bpm = max(1.0, float(self.vars["bpm"].get() or 120))
+        except (ValueError, TypeError):
+            pass
+        beat_sec = 60.0 / bpm
+        beat_width = beat_sec * px_per_second
+        nbeats = int(duration / beat_sec) + 1
+        for beat in range(nbeats + 1):
+            x = left + beat * beat_width
+            if x > left + plot_width:
+                break
+            is_bar = beat % 4 == 0
+            canvas.create_line(x, top - 8, x, height, fill="#35474E" if is_bar else "#202F35", width=1 if is_bar else 1)
+            if is_bar:
+                canvas.create_text(x + 3, 13, text=f"{beat // 4 + 1}", anchor="nw", fill="#A4B4BA", font=self._font(8, True))
+        palette = ["#2BB8AD", "#82AAF1", "#F0BD5A", "#C58CE6", "#EF7F78", "#73C68B", "#62BDE2", "#D39568"]
+        for ti, track in enumerate(tracks):
+            y = top + ti * lane_height
+            color = palette[ti % len(palette)]
+            canvas.create_rectangle(0, y, left - 2, y + lane_height - 3, fill="#17242A", outline="#2B3D44")
+            canvas.create_text(10, y + 14, text=str(track.get("name") or "Instrument")[:20], anchor="w", fill="#D8E4E7", font=self._font(8, True))
+            canvas.create_text(10, y + 29, text=str(track.get("program_name") or "MIDI track")[:18], anchor="w", fill="#91A2A8", font=self._font(7))
+            # This ribbon is derived from note counts; YAMNet scores remain a separate layer.
+            ribbon_y = y + 42
+            canvas.create_text(10, ribbon_y + 4, text="NOTOVÁ AKTIVITA", anchor="w", fill="#80949B", font=self._font(6, True))
+            notes = track.get("notes") or []
+            bin_count = min(160, max(1, int(duration / 0.5)))
+            counts = [0] * bin_count
+            for note in notes:
+                a = max(0, min(bin_count - 1, int(float(note.get("start", 0)) / max(duration, .001) * bin_count)))
+                b = max(a, min(bin_count - 1, int(float(note.get("end", 0)) / max(duration, .001) * bin_count)))
+                for bi in range(a, b + 1):
+                    counts[bi] += 1
+            peak = max(counts, default=0)
+            if peak:
+                for bi, count in enumerate(counts):
+                    if not count:
+                        continue
+                    x = left + (bi / bin_count) * plot_width
+                    w = max(1, plot_width / bin_count)
+                    opacity_height = 3 + (count / peak) * 11
+                    canvas.create_rectangle(x, ribbon_y + 13 - opacity_height, x + w, ribbon_y + 13, fill=color, outline="")
+            low, high = self._music_pitch_range(track)
+            usable = pitch_height - 8
+            row_h = usable / max(1, high - low + 1)
+            grid_top = y + 60
+            grid_bottom = grid_top + usable
+            canvas.create_rectangle(left, grid_top, left + plot_width, grid_bottom, fill="#121E23", outline="#34464D")
+            for pitch in range(low, high + 1):
+                py = grid_bottom - (pitch - low + 0.5) * row_h
+                if pitch % 12 == 0:
+                    canvas.create_line(left, py, left + plot_width, py, fill="#43565D")
+                    canvas.create_text(left - 5, py, text=note_name(pitch), anchor="e", fill="#8FA0A6", font=self._font(7))
+                elif pitch % 2 == 0:
+                    canvas.create_line(left, py, left + plot_width, py, fill="#202F35")
+            for note in notes:
+                pitch = max(low, min(high, int(note.get("pitch", 60))))
+                x0 = left + max(0.0, float(note.get("start", 0))) * px_per_second
+                x1 = left + max(float(note.get("start", 0)) + .03, float(note.get("end", 0))) * px_per_second
+                cy = grid_bottom - (pitch - low + 0.5) * row_h
+                y0, y1 = cy - max(2, row_h * .36), cy + max(2, row_h * .36)
+                selected = str(note.get("id", "")) == getattr(self, "music_selected_note_id", None)
+                rect = canvas.create_rectangle(x0, y0, max(x0 + 4, x1), y1, fill=color, outline="#E8FFFC" if selected else "#183A3A", width=2 if selected else 1)
+                self.music_note_boxes.append({"track": track, "note": note, "x0": x0, "x1": max(x0 + 4, x1), "y0": y0, "y1": y1,
+                                              "grid_top": grid_top, "grid_bottom": grid_bottom, "low": low, "high": high, "row_h": row_h, "item": rect})
+            canvas.create_line(0, y + lane_height - 2, left + plot_width, y + lane_height - 2, fill="#35474E")
+        canvas.create_text(left + 4, height - 14, text=f"{bpm:g} BPM · taktová mřížka pouze jako vodítko · notová aktivita = překryv not", anchor="w", fill="#81949B", font=self._font(7))
+        self.music_playhead_item = canvas.create_line(left, top - 7, left, height - 24, fill="#FF6572", width=2)
+        self.music_plot = (left, px_per_second, top, height - 24)
+        self._move_music_playhead()
+        self.music_status_var.set(f"{len(tracks)} stop · {sum(len(t.get('notes') or []) for t in tracks)} not · čas not zůstává v sekundách; značky LD používají 25 fps")
+
+    def _move_music_playhead(self) -> None:
+        item = getattr(self, "music_playhead_item", None)
+        if not item or not hasattr(self, "music_plot"):
+            return
+        left, px_per_second, top, bottom = self.music_plot
+        x = left + self.current_position * px_per_second
+        self.music_roll_canvas.coords(item, x, top, x, bottom)
+
+    def _music_roll_press(self, event: Any) -> None:
+        canvas = self.music_roll_canvas
+        x, y = canvas.canvasx(event.x), canvas.canvasy(event.y)
+        hit = next((box for box in reversed(self.music_note_boxes) if box["x0"] - 2 <= x <= box["x1"] + 2 and box["y0"] - 3 <= y <= box["y1"] + 3), None)
+        if hit:
+            note, track = hit["note"], hit["track"]
+            self.music_selected_note_id = str(note.get("id"))
+            self.music_drag_state = {"box": hit, "x": x, "y": y, "start": float(note.get("start", 0)), "end": float(note.get("end", 0)),
+                                     "pitch": int(note.get("pitch", 60)), "resize": hit["x1"] - x <= 8}
+            self.music_track_picker.current(self._music_tracks().index(track))
+            self._refresh_music_note_table()
+            self.draw_music_roll()
+            if not self.music_drag_state["resize"]:
+                self._seek_to(float(note.get("start", 0)))
+            return
+        left, px_per_second, _top, _bottom = self.music_plot
+        if x >= left:
+            self._seek_to(max(0, (x - left) / px_per_second))
+
+    def _music_roll_drag(self, event: Any) -> None:
+        state = getattr(self, "music_drag_state", None)
+        if not state:
+            return
+        canvas = self.music_roll_canvas
+        x, y = canvas.canvasx(event.x), canvas.canvasy(event.y)
+        box, note = state["box"], state["box"]["note"]
+        left, px_per_second, _top, _bottom = self.music_plot
+        delta = (x - state["x"]) / px_per_second
+        if state["resize"]:
+            note["end"] = max(float(note.get("start", 0)) + .03, state["end"] + delta)
+        else:
+            note["start"] = max(0.0, state["start"] + delta)
+            note["end"] = note["start"] + (state["end"] - state["start"])
+            semitones = round((state["y"] - y) / max(.1, box["row_h"]))
+            note["pitch"] = max(0, min(127, state["pitch"] + semitones))
+        note["manual"] = True
+        self.draw_music_roll()
+        self._move_music_playhead()
+
+    def _music_roll_release(self, _event: Any = None) -> None:
+        if getattr(self, "music_drag_state", None):
+            self.music_drag_state = None
+            self._record_edit_history()
+            self._refresh_music_tracks()
+            self.draw_music_roll()
+
+    def _music_note_selected(self, _event: Any = None) -> None:
+        selected = self.music_note_tree.selection()
+        if not selected:
+            return
+        self.music_selected_note_id = selected[0]
+        track = self._selected_music_track()
+        note = next((n for n in (track or {}).get("notes", []) if str(n.get("id")) == selected[0]), None)
+        if note:
+            self._seek_to(float(note.get("start", 0)))
+            self.draw_music_roll()
+
+    def add_music_note(self) -> None:
+        tracks = self._music_tracks()
+        if not tracks:
+            tracks.append({"id": uuid.uuid4().hex, "name": "Manuální stopa", "program": 0, "program_name": GM_PROGRAMS[0], "channel": 0, "notes": []})
+            self._refresh_music_tracks()
+        track = self._selected_music_track() or tracks[0]
+        start = max(0.0, self.current_position)
+        note = {"id": uuid.uuid4().hex, "pitch": 60, "start": start, "end": start + .25, "velocity": 96, "manual": True}
+        track.setdefault("notes", []).append(note)
+        self.music_selected_note_id = note["id"]
+        self._record_edit_history()
+        self._refresh_music_tracks()
+        self.draw_music_roll()
+
+    def remove_music_note(self) -> None:
+        selected = self.music_note_tree.selection()
+        note_id = selected[0] if selected else getattr(self, "music_selected_note_id", None)
+        track = self._selected_music_track()
+        if not note_id or not track:
+            return
+        track["notes"] = [note for note in track.get("notes", []) if str(note.get("id")) != note_id]
+        self.music_selected_note_id = None
+        self._record_edit_history()
+        self._refresh_music_tracks()
+        self.draw_music_roll()
+
+    def _edit_music_note_cell(self, event: Any) -> None:
+        item = self.music_note_tree.identify_row(event.y)
+        column = self.music_note_tree.identify_column(event.x)
+        if not item or column not in {"#1", "#2", "#3", "#4"}:
+            return
+        track = self._selected_music_track()
+        note = next((n for n in (track or {}).get("notes", []) if str(n.get("id")) == item), None)
+        box = self.music_note_tree.bbox(item, column)
+        if note is None or not box:
+            return
+        x, y, width, height = box
+        editor = ttk.Entry(self.music_note_tree)
+        current = (note_name(note.get("pitch", 60)), f"{float(note.get('start', 0)):.3f}", f"{float(note.get('end', 0)):.3f}", str(note.get("velocity", 96)))[int(column[1:]) - 1]
+        editor.insert(0, current)
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.focus_set()
+        committed = {"value": False}
+        def commit(_event: Any = None) -> None:
+            if committed["value"]:
+                return
+            try:
+                value = editor.get().strip()
+                if column == "#1":
+                    match = re.fullmatch(r"([A-Ga-g])([#♯b♭]?)(-?\d+)", value)
+                    if match:
+                        semis = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+                        pitch = (int(match.group(3)) + 1) * 12 + semis[match.group(1).upper()] + (1 if match.group(2) in {"#", "♯"} else -1 if match.group(2) in {"b", "♭"} else 0)
+                    else:
+                        pitch = int(value)
+                    note["pitch"] = max(0, min(127, pitch))
+                elif column == "#2":
+                    note["start"] = max(0.0, float(value))
+                    if note["end"] <= note["start"]:
+                        note["end"] = note["start"] + .03
+                elif column == "#3":
+                    note["end"] = max(float(note["start"]) + .03, float(value))
+                else:
+                    note["velocity"] = max(1, min(127, int(value)))
+                note["manual"] = True
+            except (ValueError, TypeError):
+                messagebox.showerror("Editace noty", "Zadejte číslo MIDI 0–127, tón (např. C4), čas v sekundách nebo velocity 1–127.")
+                editor.focus_set()
+                return
+            committed["value"] = True
+            editor.destroy()
+            self._record_edit_history()
+            self._refresh_music_tracks()
+            self.draw_music_roll()
+        editor.bind("<Return>", commit)
+        editor.bind("<FocusOut>", commit)
+
+    def _instrument_unavailable_note(self) -> None:
+        self.music_status_var.set("AI přepis celého mixu: připravuji místní MuScriptor engine. MIDI import/export a ruční editace jsou k dispozici.")
+
     def _timeline_mousewheel(self, event: Any) -> str | None:
         canvas = getattr(self, "timeline_scroll_canvas", None)
         if canvas is None:
@@ -1117,6 +2095,8 @@ class SongSheetApp:
 
     def _entry_changed(self, key: str) -> None:
         self.schedule_preview()
+        if key == "bpm" and hasattr(self, "music_roll_canvas"):
+            self.draw_music_roll()
         if key == "duration" and hasattr(self, "timeline_canvas"):
             self._update_scale_range()
             self.draw_timeline()
@@ -1288,6 +2268,7 @@ class SongSheetApp:
             ("Zvuk", "*.wav *.mp3 *.flac *.m4a *.aac *.ogg *.aiff *.aif"), ("Všechny soubory", "*.*")])
         if not path:
             return
+        self._invalidate_music_analysis()
         self._close_playback()
         self.instrument_job_id += 1
         self.instrument_busy = False
@@ -1304,6 +2285,8 @@ class SongSheetApp:
         self.state["instrument_summary_short"] = ""
         self.state["instrument_events"] = []
         self.state["instrument_activity"] = {"model": "YAMNet/AudioSet", "step": 0.48, "rows": []}
+        self.state["music_analysis"] = {"schema_version": 1, "engine": "", "model": "", "tracks": []}
+        self._reset_edit_history()
         self.current_position = 0.0
         self.selected_marker_id = None
         self.instrument_summary_var.set("Analyzuji možné nástrojové vrstvy…")
@@ -1312,12 +2295,14 @@ class SongSheetApp:
         self.vars["duration"].set("")
         self.vars["bpm"].set("")
         self._refresh_marker_table()
+        self._refresh_music_tracks()
         self._refresh_cue_text()
         self.text_widgets["sections"].delete("1.0", "end")
         if not self.vars["title"].get().strip():
             self.vars["title"].set(Path(path).stem)
         self.audio_status.set(f"Analyzuji {Path(path).name}…")
         self.draw_timeline()
+        self.draw_music_roll()
         threading.Thread(target=self._analyze_worker, args=(path,), daemon=True).start()
 
     def duration_seconds(self) -> float:
@@ -1439,6 +2424,7 @@ class SongSheetApp:
         except queue.Empty:
             pass
         self._poll_instrument_analysis()
+        self._poll_music_analysis()
         self._poll_playback_ready()
         self.root.after(200, self._poll_analysis)
 
@@ -1591,6 +2577,7 @@ class SongSheetApp:
             with self.playback_lock:
                 self.playback_wave.setpos(min(self.playback_frames, int(round(self.current_position * self.playback_rate))))
         self._move_playhead()
+        self._move_music_playhead()
         self.position_text.set(f"{tc25(self.current_position)} / {tc25(duration)}")
 
     def _update_scale_range(self) -> None:
@@ -1603,6 +2590,7 @@ class SongSheetApp:
         self.current_position = float(value)
         self.position_text.set(f"{tc25(self.current_position)} / {tc25(self.duration_seconds())}")
         self._move_playhead()
+        self._move_music_playhead()
 
     def _on_position_release(self, _event: Any = None) -> None:
         self._seek_to(float(self.position_scale.get()))
@@ -1813,8 +2801,11 @@ class SongSheetApp:
             self._seek_to(self._time_at_canvas_x(event.x))
 
     def _timeline_release(self, _event: Any) -> None:
+        moved_marker = bool(self.marker_drag_id)
         self.marker_drag_id = None
         self._seek_to(self.current_position)
+        if moved_marker:
+            self._record_edit_history()
 
     def add_marker(self) -> None:
         instrument = self.instrument_filter_var.get()
@@ -1823,6 +2814,7 @@ class SongSheetApp:
         marker = {"id": uuid.uuid4().hex, "label": "Nová značka", "time": round(self.current_position * FPS) / FPS, "kind": "Cue", "instrument": instrument}
         self.state.setdefault("markers", []).append(marker)
         self.selected_marker_id = marker["id"]
+        self._record_edit_history()
         self._refresh_marker_table()
         self._refresh_cue_text()
         self.draw_timeline()
@@ -1876,6 +2868,7 @@ class SongSheetApp:
                 "source": event.get("source", ""),
             })
             added += 1
+        self._record_edit_history()
         self._refresh_marker_table()
         self._refresh_cue_text()
         self.draw_timeline()
@@ -1889,6 +2882,7 @@ class SongSheetApp:
             return
         self.state["markers"] = [m for m in self.state.get("markers", []) if str(m.get("id")) != marker_id]
         self.selected_marker_id = None
+        self._record_edit_history()
         self._refresh_marker_table()
         self._refresh_cue_text()
         self.draw_timeline()
@@ -1994,6 +2988,7 @@ class SongSheetApp:
                 return
             editor.destroy()
             self.selected_marker_id = item
+            self._record_edit_history()
             self._refresh_marker_table()
             self._refresh_cue_text()
             self.draw_timeline()
@@ -2029,6 +3024,7 @@ class SongSheetApp:
 
     def _project_payload(self, destination: Path) -> dict[str, Any]:
         state = self.collect_state()
+        state["music_analysis"] = normalize_music_analysis(state.get("music_analysis"))
         assets_dir = destination.with_suffix("").with_name(destination.stem + "_assets")
         refs_dir = assets_dir / "references"
         audio_dir = assets_dir / "audio"
@@ -2040,6 +3036,8 @@ class SongSheetApp:
             if src.resolve() != dest.resolve():
                 shutil.copy2(src, dest)
             state["audio_path"] = str(Path(destination.stem + "_assets") / "audio" / src.name)
+            if state.get("music_analysis") and state["music_analysis"].get("tracks"):
+                state["music_analysis"]["source_audio"] = state["audio_path"]
         refs_relative = []
         for index, raw in enumerate(state.get("references", []), start=1):
             src = Path(raw)
@@ -2053,7 +3051,7 @@ class SongSheetApp:
                 shutil.copy2(src, target)
             refs_relative.append(str(Path(destination.stem + "_assets") / "references" / target.name))
         state["references"] = refs_relative
-        return {"format": "stardance-songsheet", "version": 1, "state": state}
+        return {"format": "stardance-songsheet", "version": 2, "state": state}
 
     def save_project(self) -> None:
         if self.project_path is None:
@@ -2072,12 +3070,14 @@ class SongSheetApp:
         path = filedialog.askopenfilename(title="Otevřít SongSheet projekt", filetypes=[("SongSheet projekt", "*.json"), ("JSON", "*.json")])
         if not path:
             return
+        self._invalidate_music_analysis()
         try:
             document = json.loads(Path(path).read_text(encoding="utf-8"))
             state = document.get("state", document)
             state = {**json.loads(json.dumps(DEFAULTS)), **state}
             state["metadata"] = {**DEFAULTS["metadata"], **state.get("metadata", {})}
             state["production"] = {**DEFAULTS["production"], **state.get("production", {})}
+            state["music_analysis"] = normalize_music_analysis(state.get("music_analysis"))
             normalized = []
             for item in state.get("markers", []) or []:
                 try:
@@ -2110,6 +3110,8 @@ class SongSheetApp:
                 p = Path(state.get(key, "")) if state.get(key) else None
                 if p and not p.is_absolute():
                     state[key] = str((base / p).resolve())
+            if state.get("music_analysis", {}).get("source_audio") and not Path(state["music_analysis"]["source_audio"]).is_absolute():
+                state["music_analysis"]["source_audio"] = str((base / state["music_analysis"]["source_audio"]).resolve())
             state["references"] = [str((base / p).resolve()) if not Path(p).is_absolute() else p for p in state.get("references", [])]
             self.instrument_job_id += 1
             self.instrument_busy = False
@@ -2117,6 +3119,7 @@ class SongSheetApp:
             self._close_playback()
             self.current_position = 0.0
             self.state = state
+            self._reset_edit_history()
             self.project_path = Path(path)
             for key, var in self.vars.items():
                 if key.startswith("meta_"):
@@ -2136,6 +3139,7 @@ class SongSheetApp:
             activity_count = len((state.get("instrument_activity") or {}).get("rows", []))
             self.instrument_status_var.set(f"Projekt obsahuje časovou osu YAMNet/AudioSet ({activity_count} tříd)." if activity_count else "YAMNet/AudioSet: časová skóre se načtou po prvním spuštění analýzy.")
             self._refresh_marker_table()
+            self._refresh_music_tracks()
             self._refresh_cue_text()
             self.dark_var.set(bool(state.get("dark")))
             self.wave_var.set(bool(state.get("show_waveform", True)))
@@ -2146,6 +3150,7 @@ class SongSheetApp:
             self.audio_status.set(f"Otevřeno: {Path(path).name}" + (f" · audio {Path(audio_path).name}" if audio_path else ""))
             self._update_scale_range()
             self.draw_timeline()
+            self.draw_music_roll()
             self.schedule_preview()
         except (OSError, ValueError, TypeError) as exc:
             messagebox.showerror("Otevření projektu", str(exc))
@@ -2199,7 +3204,9 @@ class SongSheetApp:
     def new_project(self) -> None:
         if not messagebox.askyesno("Nový projekt", "Začít nový song sheet? Neuložené změny budou ztraceny."):
             return
+        self._invalidate_music_analysis()
         self.state = json.loads(json.dumps(DEFAULTS))
+        self._reset_edit_history()
         self.instrument_job_id += 1
         self.instrument_busy = False
         self.instrument_analyze_button.configure(state="normal")
@@ -2219,6 +3226,7 @@ class SongSheetApp:
             self._replace_text(key, "")
         self.selected_marker_id = None
         self._refresh_marker_table()
+        self._refresh_music_tracks()
         self._refresh_cue_text()
         self.dark_var.set(False)
         self.wave_var.set(True)
@@ -2228,6 +3236,7 @@ class SongSheetApp:
         self.audio_status.set("Nový projekt")
         self._update_scale_range()
         self.draw_timeline()
+        self.draw_music_roll()
         self.schedule_preview()
 
     def _on_close(self) -> None:

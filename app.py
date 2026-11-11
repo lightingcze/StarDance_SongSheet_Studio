@@ -799,9 +799,18 @@ class PageRenderer:
 class SongSheetApp:
     def __init__(self, root: tk.Tk):
         self.root = root
+        self.ui_font_family = str(root.tk.call("font", "actual", "TkDefaultFont", "-family"))
         self.root.title(APP_NAME)
         self.root.geometry("1510x970")
-        self.root.minsize(1100, 720)
+        self.root.minsize(1180, 760)
+        self.ui = {
+            "bg": "#10171C", "chrome": "#151F25", "panel": "#172127",
+            "workspace": "#0E151A",
+            "panel2": "#202E36", "line": "#33454E", "muted": "#9CABB2",
+            "text": "#E8EEF0", "teal": "#22B6AA", "teal_dark": "#157E78",
+            "teal_bright": "#34CFC0", "gold": "#F0BD5A", "field": "#111A1F",
+        }
+        self.root.configure(background=self.ui["bg"])
         self.state = json.loads(json.dumps(DEFAULTS))
         self.project_path: Path | None = None
         self.vars: dict[str, tk.StringVar] = {}
@@ -846,23 +855,52 @@ class SongSheetApp:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        toolbar = ttk.Frame(self.root, padding=(8, 7))
+        self._configure_ui_style(style)
+
+        toolbar = ttk.Frame(self.root, padding=(16, 10), style="Header.TFrame")
         toolbar.pack(side="top", fill="x")
-        buttons = [
-            ("Nový", self.new_project), ("Otevřít", self.open_project), ("Uložit", self.save_project),
-            ("Načíst audio", self.import_audio), ("Přidat referenci", self.add_reference),
-            ("Export PDF", self.export_pdf), ("Export PNG", self.export_png),
+        brand = ttk.Frame(toolbar, style="Header.TFrame")
+        brand.pack(side="left", padx=(0, 16))
+        tk.Label(brand, text="S", bg="#167D78", fg="#092623", font=self._font(14, True),
+                 padx=9, pady=3, borderwidth=0).pack(side="left", padx=(0, 9))
+        brand_text = ttk.Frame(brand, style="Header.TFrame")
+        brand_text.pack(side="left")
+        ttk.Label(brand_text, text="StarDance", style="Brand.TLabel").pack(anchor="w")
+        ttk.Label(brand_text, text="SONGSHEET STUDIO · 2026", style="BrandMeta.TLabel").pack(anchor="w", pady=(2, 0))
+
+        actions = ttk.Frame(toolbar, style="Header.TFrame")
+        actions.pack(side="right")
+        action_buttons = [
+            ("Nový", self.new_project, "Quiet.TButton"),
+            ("Otevřít", self.open_project, "Quiet.TButton"),
+            ("Uložit projekt", self.save_project, "TButton"),
+            ("Načíst audio", self.import_audio, "Primary.TButton"),
+            ("＋ Reference", self.add_reference, "TButton"),
+            ("Export PNG", self.export_png, "Quiet.TButton"),
+            ("Export PDF", self.export_pdf, "Accent.TButton"),
         ]
-        for label, command in buttons:
-            ttk.Button(toolbar, text=label, command=command).pack(side="left", padx=(0, 6))
-        ttk.Label(toolbar, textvariable=self.audio_status, anchor="e").pack(side="right", fill="x", expand=True, padx=8)
+        for label, command, button_style in action_buttons:
+            ttk.Button(actions, text=label, command=command, style=button_style).pack(side="left", padx=(0, 5))
+
+        status = ttk.Label(toolbar, textvariable=self.audio_status, anchor="e", style="Status.TLabel")
+        status.pack(side="right", fill="x", expand=True, padx=(12, 16))
+
+        context_bar = ttk.Frame(self.root, padding=(18, 7), style="Menu.TFrame")
+        context_bar.pack(side="top", fill="x")
+        ttk.Label(context_bar, text="EDITOR PROJEKTU  /  SONG SHEET", style="Meta.TLabel").pack(side="left")
+        ttk.Label(context_bar, text="LOKÁLNÍ PRACOVNÍ KOPIE     ·     A4 NA ŠÍŘKU     ·     25 FPS", style="Meta.TLabel").pack(side="right")
 
         split = ttk.Panedwindow(self.root, orient="horizontal")
-        split.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        editor = ttk.Frame(split, width=485)
-        preview = ttk.Frame(split)
+        split.pack(fill="both", expand=True)
+        editor = ttk.Frame(split, width=345, style="Panel.TFrame")
+        preview = ttk.Frame(split, style="Workspace.TFrame")
         split.add(editor, weight=0)
         split.add(preview, weight=1)
+
+        editor_heading = ttk.Frame(editor, padding=(15, 13, 12, 10), style="Panel.TFrame")
+        editor_heading.pack(fill="x")
+        ttk.Label(editor_heading, text="EDITOR PROJEKTU", style="Eyebrow.TLabel").pack(anchor="w")
+        ttk.Label(editor_heading, text="Song sheet", style="PanelTitle.TLabel").pack(anchor="w", pady=(3, 0))
 
         self.notebook = ttk.Notebook(editor)
         self.notebook.pack(fill="both", expand=True)
@@ -872,25 +910,115 @@ class SongSheetApp:
         self._build_ld_tab()
         self._build_layout_tab()
 
-        self.right_notebook = ttk.Notebook(preview)
+        self.right_notebook = ttk.Notebook(preview, style="Workspace.TNotebook")
         self.right_notebook.pack(fill="both", expand=True)
-        print_tab = ttk.Frame(self.right_notebook)
-        timeline_tab = ttk.Frame(self.right_notebook)
+        print_tab = ttk.Frame(self.right_notebook, style="Workspace.TFrame")
+        timeline_tab = ttk.Frame(self.right_notebook, style="Workspace.TFrame")
         self.right_notebook.add(print_tab, text="Tiskový náhled")
         self.right_notebook.add(timeline_tab, text="Audio a značky")
 
-        preview_head = ttk.Frame(print_tab, padding=(8, 4))
+        preview_head = ttk.Frame(print_tab, padding=(18, 10), style="Workspace.TFrame")
         preview_head.pack(fill="x")
-        ttk.Label(preview_head, text="NÁHLED TISKOVÉ STRÁNKY", font=("TkDefaultFont", 10, "bold")).pack(side="left")
+        preview_title = ttk.Frame(preview_head, style="Workspace.TFrame")
+        preview_title.pack(side="left")
+        ttk.Label(preview_title, text="NÁHLED TISKOVÉ STRÁNKY", style="Eyebrow.TLabel").pack(anchor="w")
+        ttk.Label(preview_title, text="Tiskový náhled", style="PanelTitle.TLabel").pack(anchor="w", pady=(2, 0))
         self.page_button = tk.IntVar(value=1)
-        ttk.Radiobutton(preview_head, text="1 · Hudba", variable=self.page_button, value=1, command=self.change_page).pack(side="right", padx=4)
-        ttk.Radiobutton(preview_head, text="2 · Produkce", variable=self.page_button, value=2, command=self.change_page).pack(side="right", padx=4)
-        self.preview_canvas = tk.Canvas(print_tab, background="#DCE3E5", highlightthickness=0)
+        ttk.Radiobutton(preview_head, text="1 · Hudba", variable=self.page_button, value=1, command=self.change_page, style="Toolbutton").pack(side="right", padx=(3, 0))
+        ttk.Radiobutton(preview_head, text="2 · Produkce", variable=self.page_button, value=2, command=self.change_page, style="Toolbutton").pack(side="right", padx=(3, 0))
+        self.preview_canvas = tk.Canvas(print_tab, background=self.ui["bg"], highlightthickness=0)
         self.preview_canvas.pack(fill="both", expand=True)
         self.preview_canvas.bind("<Configure>", lambda _e: self.show_preview())
         self._build_timeline_ui(timeline_tab)
 
+    def _configure_ui_style(self, style: ttk.Style) -> None:
+        c = self.ui
+        style.configure("TFrame", background=c["panel"])
+        style.configure("Header.TFrame", background="#121A20")
+        style.configure("Menu.TFrame", background="#172127")
+        style.configure("Panel.TFrame", background=c["panel"])
+        style.configure("Workspace.TFrame", background=c["workspace"])
+        style.configure("TLabel", background=c["panel"], foreground=c["text"], font=self._font(9))
+        style.configure("Eyebrow.TLabel", background=c["panel"], foreground="#819198", font=self._font(8, True))
+        style.configure("PanelTitle.TLabel", background=c["panel"], foreground="#E1ECEE", font=self._font(13, True))
+        style.configure("Field.TLabel", background=c["panel"], foreground="#AEBBC0", font=self._font(9))
+        style.configure("Muted.TLabel", background=c["panel"], foreground="#8999A0", font=self._font(8))
+        style.configure("Meta.TLabel", background="#172127", foreground="#93A3AA", font=self._font(8, True))
+        style.configure("Brand.TLabel", background="#121A20", foreground="#E8EEF0", font=self._font(11, True))
+        style.configure("BrandMeta.TLabel", background="#121A20", foreground="#87979E", font=self._font(7, True))
+        style.configure("Status.TLabel", background="#121A20", foreground="#9CABB2", font=self._font(8))
+        style.configure("Info.TLabel", background="#172C2C", foreground="#9DDBD4", padding=(10, 8), font=self._font(8))
+        style.configure("Warning.TLabel", background="#2B261B", foreground="#D7C28E", padding=(10, 8), font=self._font(8))
+
+        style.configure("TButton", background=c["panel2"], foreground="#D6E0E3", bordercolor="#3B4C54",
+                        lightcolor="#3B4C54", darkcolor=c["panel2"], padding=(10, 6), relief="flat", font=self._font(8))
+        style.map("TButton", background=[("pressed", "#182329"), ("active", "#2A3940"), ("disabled", c["panel"])],
+                  foreground=[("disabled", "#77868D")])
+        style.configure("Quiet.TButton", background="#121A20", foreground="#ADBBC0", bordercolor="#121A20",
+                        padding=(8, 6), relief="flat", font=self._font(8))
+        style.map("Quiet.TButton", background=[("active", "#2A3940"), ("pressed", "#202D34")], foreground=[("active", "#E8EEF0")])
+        style.configure("Primary.TButton", background=c["teal_dark"], foreground="#EDFFFD", bordercolor="#209990",
+                        padding=(11, 6), relief="flat", font=self._font(8, True))
+        style.map("Primary.TButton", background=[("active", "#1A958D"), ("pressed", "#126F6B"), ("disabled", "#283A3F")],
+                  foreground=[("disabled", "#839399")])
+        style.configure("Accent.TButton", background="#202D34", foreground="#D6E0E3", bordercolor="#3B4C54",
+                        padding=(10, 6), relief="flat", font=self._font(8, True))
+        style.map("Accent.TButton", background=[("active", "#2A3940"), ("pressed", "#182329")], foreground=[("active", "#EDFFFD")])
+
+        style.configure("TNotebook", background=c["panel"], borderwidth=0, tabmargins=(7, 4, 7, 0))
+        style.configure("TNotebook.Tab", background="#172127", foreground="#91A0A7", padding=(6, 7),
+                        borderwidth=0, font=self._font(8, True))
+        style.map("TNotebook.Tab", background=[("selected", "#153C3B"), ("active", "#233139")],
+                  foreground=[("selected", "#DFFBF7"), ("active", "#D7E2E5")])
+        style.configure("Workspace.TNotebook", background=c["workspace"], borderwidth=0, tabmargins=(12, 0, 8, 0))
+        style.configure("Workspace.TNotebook.Tab", background=c["workspace"], foreground="#85969D",
+                        padding=(7, 9), borderwidth=0, font=self._font(8))
+        style.map("Workspace.TNotebook.Tab", background=[("selected", c["workspace"]), ("active", "#182329")],
+                  foreground=[("selected", "#E1ECEE"), ("active", "#D7E2E5")])
+        style.configure("TEntry", fieldbackground=c["field"], foreground="#E8EFF1",
+                        bordercolor="#3B4B53", lightcolor="#3B4B53", darkcolor="#3B4B53", padding=(8, 7))
+        style.map("TEntry", bordercolor=[("focus", "#30AAA0")], lightcolor=[("focus", "#30AAA0")])
+        style.configure("TCombobox", fieldbackground=c["field"], background=c["panel2"], foreground="#E8EFF1",
+                        arrowcolor="#9CABB2", bordercolor="#3B4B53", padding=(7, 5))
+        style.map("TCombobox", fieldbackground=[("readonly", c["field"])], foreground=[("readonly", "#E8EFF1")],
+                  selectbackground=[("readonly", "#153C3B")], selectforeground=[("readonly", "#E8EFF1")])
+        style.configure("TCheckbutton", background=c["panel"], foreground="#C4D0D3", padding=4)
+        style.map("TCheckbutton", background=[("active", c["panel"])], foreground=[("active", "#E8EEF0")])
+        style.configure("TRadiobutton", background=c["panel"], foreground="#C4D0D3", padding=(7, 5))
+        style.map("TRadiobutton", background=[("active", c["panel"])], foreground=[("active", "#E8EEF0")])
+        style.configure("Toolbutton", background="#162128", foreground="#92A1A7", padding=(9, 6), borderwidth=0)
+        style.map("Toolbutton", background=[("selected", "#2B3B41"), ("active", "#233139")],
+                  foreground=[("selected", "#E9F3F4"), ("active", "#D7E2E5")])
+        style.configure("TScale", background=c["panel"], troughcolor="#34434A", borderwidth=0, sliderlength=14)
+        style.configure("TPanedwindow", background=c["workspace"], sashthickness=5, sashrelief="flat")
+        style.configure("Treeview", background=c["field"], fieldbackground=c["field"], foreground="#D9E3E6",
+                        bordercolor=c["line"], rowheight=27, font=self._font(8))
+        style.map("Treeview", background=[("selected", "#153C3B")], foreground=[("selected", "#E9FFFC")])
+        style.configure("Treeview.Heading", background="#172127", foreground="#AEBBC0", relief="flat",
+                        padding=(8, 7), font=self._font(8, True))
+        style.map("Treeview.Heading", background=[("active", "#233139")])
+        style.configure("Vertical.TScrollbar", background="#233139", troughcolor=c["panel"], bordercolor=c["panel"], arrowcolor="#93A3AA")
+
+    def _font(self, size: int, bold: bool = False) -> tuple[str, int, str]:
+        return self.ui_font_family, size, "bold" if bold else "normal"
+
     def _build_timeline_ui(self, parent: ttk.Frame) -> None:
+        shell = ttk.Frame(parent, style="Workspace.TFrame")
+        shell.pack(fill="both", expand=True)
+        scroll_canvas = tk.Canvas(shell, background=self.ui["workspace"], highlightthickness=0, borderwidth=0)
+        scroll_bar = ttk.Scrollbar(shell, orient="vertical", command=scroll_canvas.yview)
+        content = ttk.Frame(scroll_canvas, style="Workspace.TFrame")
+        content_window = scroll_canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>", lambda _e: scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all")))
+        scroll_canvas.bind("<Configure>", lambda event: scroll_canvas.itemconfigure(content_window, width=event.width))
+        scroll_canvas.configure(yscrollcommand=scroll_bar.set)
+        scroll_canvas.pack(side="left", fill="both", expand=True)
+        scroll_bar.pack(side="right", fill="y")
+        self.timeline_scroll_canvas = scroll_canvas
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.bind_all(sequence, self._timeline_mousewheel, add="+")
+        parent = content
+
         transport = ttk.Frame(parent, padding=(10, 9))
         transport.pack(fill="x")
         self.play_button = ttk.Button(transport, text="▶ Přehrát", command=self.toggle_playback)
@@ -902,37 +1030,37 @@ class SongSheetApp:
         self.position_scale.pack(side="left", fill="x", expand=True, padx=(8, 0))
         self.position_scale.bind("<ButtonRelease-1>", self._on_position_release)
         self.instrument_summary_var = tk.StringVar(value="Nástrojové vrstvy se analyzují heuristicky; přesný instrument ověřte poslechem.")
-        ttk.Label(parent, textvariable=self.instrument_summary_var, wraplength=820, justify="left", foreground="#6B5A32").pack(fill="x", padx=13, pady=(0, 7))
-        instrument_tools = ttk.Frame(parent, padding=(10, 0, 10, 4))
+        ttk.Label(parent, textvariable=self.instrument_summary_var, wraplength=820, justify="left", style="Warning.TLabel").pack(fill="x", padx=13, pady=(0, 7))
+        instrument_tools = ttk.Frame(parent, padding=(12, 0, 12, 5), style="Panel.TFrame")
         instrument_tools.pack(fill="x")
-        self.instrument_analyze_button = ttk.Button(instrument_tools, text="♫ Analyzovat nástroje v čase (YAMNet)", command=self.analyze_instrument_layers)
+        self.instrument_analyze_button = ttk.Button(instrument_tools, text="♫  Analyzovat nástroje v čase", command=self.analyze_instrument_layers, style="Primary.TButton")
         self.instrument_analyze_button.pack(side="left")
-        ttk.Label(instrument_tools, textvariable=self.instrument_status_var, wraplength=670, justify="left", foreground="#5F7078").pack(side="left", fill="x", expand=True, padx=10)
+        ttk.Label(instrument_tools, textvariable=self.instrument_status_var, wraplength=670, justify="left", style="Muted.TLabel").pack(side="left", fill="x", expand=True, padx=10)
 
         self.instrument_timeline_canvas = tk.Canvas(parent, height=105, background="#111A1F", highlightthickness=0)
         self.instrument_timeline_canvas.pack(fill="x", padx=12, pady=(0, 7))
         self.instrument_timeline_canvas.bind("<Configure>", lambda _e: self.draw_instrument_timeline())
         self.instrument_timeline_canvas.bind("<Button-1>", self._instrument_timeline_click)
 
-        self.timeline_canvas = tk.Canvas(parent, height=320, background="#16222A", highlightthickness=0)
+        self.timeline_canvas = tk.Canvas(parent, height=320, background="#111A1F", highlightthickness=0)
         self.timeline_canvas.pack(fill="x", padx=12, pady=(0, 6))
         self.timeline_canvas.bind("<Configure>", lambda _e: self.draw_timeline())
         self.timeline_canvas.bind("<Button-1>", self._timeline_press)
         self.timeline_canvas.bind("<B1-Motion>", self._timeline_drag)
         self.timeline_canvas.bind("<ButtonRelease-1>", self._timeline_release)
-        ttk.Label(parent, text="Klik waveformem pro posun playheadu. Přetáhněte svislou značku nebo dvojklikem upravte její buňku v tabulce.", foreground="#5F7078").pack(anchor="w", padx=14, pady=(0, 5))
+        ttk.Label(parent, text="Klik waveformem pro posun playheadu. Přetáhněte značku nebo upravte její čas v tabulce.", style="Muted.TLabel").pack(anchor="w", padx=14, pady=(0, 5))
 
-        marker_bar = ttk.Frame(parent, padding=(10, 3))
+        marker_bar = ttk.Frame(parent, padding=(12, 6), style="Panel.TFrame")
         marker_bar.pack(fill="x")
-        ttk.Label(marker_bar, text="EDITOVATELNÉ ZNAČKY", font=("TkDefaultFont", 9, "bold")).pack(side="left")
+        ttk.Label(marker_bar, text="EDITOVATELNÉ ZNAČKY", style="Eyebrow.TLabel").pack(side="left")
         self.instrument_filter_var = tk.StringVar(value="Všechny")
-        ttk.Label(marker_bar, text="Filtr vrstvy:").pack(side="right", padx=(10, 4))
+        ttk.Label(marker_bar, text="Filtr vrstvy", style="Field.TLabel").pack(side="right", padx=(10, 4))
         self.instrument_filter = ttk.Combobox(marker_bar, textvariable=self.instrument_filter_var, state="readonly", width=21, values=INSTRUMENT_FILTERS)
         self.instrument_filter.pack(side="right")
         self.instrument_filter.bind("<<ComboboxSelected>>", self._instrument_filter_changed)
-        ttk.Button(marker_bar, text="＋ Přidat značku", command=self.add_marker).pack(side="right", padx=(5, 0))
-        ttk.Button(marker_bar, text="⚙ Značky z odhadu", command=self.generate_instrument_markers).pack(side="right", padx=(5, 0))
-        ttk.Button(marker_bar, text="− Odebrat vybranou", command=self.remove_marker).pack(side="right")
+        ttk.Button(marker_bar, text="＋ Značka", command=self.add_marker, style="Primary.TButton").pack(side="right", padx=(5, 0))
+        ttk.Button(marker_bar, text="✦ Značky z odhadu", command=self.generate_instrument_markers).pack(side="right", padx=(5, 0))
+        ttk.Button(marker_bar, text="− Odebrat", command=self.remove_marker, style="Quiet.TButton").pack(side="right")
 
         table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
         table_frame.pack(fill="both", expand=True)
@@ -949,20 +1077,42 @@ class SongSheetApp:
         self.marker_tree.column("instrument", width=220, minwidth=150, anchor="center")
         self.marker_tree.column("evidence", width=180, minwidth=130, anchor="center")
         tree_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.marker_tree.yview)
-        self.marker_tree.configure(yscrollcommand=tree_scroll.set)
+        tree_xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.marker_tree.xview)
+        self.marker_tree.configure(yscrollcommand=tree_scroll.set, xscrollcommand=tree_xscroll.set)
         self.marker_tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="right", fill="y")
+        tree_xscroll.pack(side="bottom", fill="x")
         self.marker_tree.bind("<<TreeviewSelect>>", self._marker_selected)
         self.marker_tree.bind("<Double-1>", self._edit_marker_cell)
 
-    def _entry_row(self, parent: ttk.Frame, key: str, label: str, default: str = "") -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill="x", padx=9, pady=4)
-        ttk.Label(row, text=label, width=16, anchor="w").pack(side="left")
+    def _timeline_mousewheel(self, event: Any) -> str | None:
+        canvas = getattr(self, "timeline_scroll_canvas", None)
+        if canvas is None:
+            return None
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not canvas:
+            widget = getattr(widget, "master", None)
+        if widget is not canvas:
+            return None
+        if getattr(event, "num", None) == 4:
+            direction, units = -1, 1
+        elif getattr(event, "num", None) == 5:
+            direction, units = 1, 1
+        else:
+            delta = int(getattr(event, "delta", 0) or 0)
+            direction = -1 if delta > 0 else 1
+            units = max(1, abs(delta) // 120) if sys.platform != "darwin" else 1
+        canvas.yview_scroll(direction * units, "units")
+        return "break"
+
+    def _entry_row(self, parent: ttk.Frame, key: str, label: str, default: str = "", padx: int = 0) -> None:
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill="x", padx=padx, pady=(4, 7))
+        ttk.Label(row, text=label, style="Field.TLabel", anchor="w").pack(anchor="w", pady=(0, 4))
         var = tk.StringVar(value=default)
         self.vars[key] = var
         entry = ttk.Entry(row, textvariable=var)
-        entry.pack(side="left", fill="x", expand=True)
+        entry.pack(fill="x", expand=True)
         var.trace_add("write", lambda *_: self._entry_changed(key))
 
     def _entry_changed(self, key: str) -> None:
@@ -972,10 +1122,13 @@ class SongSheetApp:
             self.draw_timeline()
 
     def _text_panel(self, parent: ttk.Frame, key: str, label: str, height: int = 7) -> tk.Text:
-        frame = ttk.Frame(parent)
+        frame = ttk.Frame(parent, style="Panel.TFrame")
         frame.pack(fill="both", expand=True, padx=8, pady=5)
-        ttk.Label(frame, text=label, font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(0, 3))
-        text = tk.Text(frame, height=height, wrap="word", undo=True, font=("TkDefaultFont", 9))
+        ttk.Label(frame, text=label, style="Field.TLabel", font=self._font(9, True)).pack(anchor="w", pady=(0, 5))
+        text = tk.Text(frame, height=height, wrap="word", undo=True, font=self._font(9),
+                       background=self.ui["field"], foreground="#E8EFF1", insertbackground=self.ui["teal"],
+                       selectbackground="#24655F", selectforeground="#F0FFFD", relief="flat", bd=0,
+                       padx=9, pady=7, highlightthickness=1, highlightbackground="#3B4B53", highlightcolor="#30AAA0")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         text.pack(side="left", fill="both", expand=True)
@@ -985,32 +1138,46 @@ class SongSheetApp:
         return text
 
     def _build_metadata_tab(self) -> None:
-        tab = ttk.Frame(self.notebook)
+        tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=(0, 8))
         self.notebook.add(tab, text="Skladba")
-        for key, label in [("title", "Název skladby"), ("episode", "Díl"), ("artist", "Interpret"), ("performer", "Účinkující"), ("dance", "Tanec")]:
-            self._entry_row(tab, f"meta_{key}", label)
-        self._entry_row(tab, "duration", "Délka (HH:MM:SS:FF)")
-        self._entry_row(tab, "bpm", "Tempo BPM (odhad)")
-        ttk.Label(tab, text="BPM, takt a první doba vyžadují poslechovou kontrolu.", wraplength=430, foreground="#945F00").pack(fill="x", padx=12, pady=7)
-        ttk.Label(tab, text="Projekt se zpracovává lokálně; audio se nikam neodesílá.", wraplength=430).pack(fill="x", padx=12, pady=(2, 9))
+        self._entry_row(tab, "meta_title", "Název skladby", padx=12)
+
+        def paired(left_key: str, left_label: str, right_key: str, right_label: str) -> None:
+            pair = ttk.Frame(tab, style="Panel.TFrame")
+            pair.pack(fill="x", padx=12)
+            left = ttk.Frame(pair, style="Panel.TFrame")
+            left.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            right = ttk.Frame(pair, style="Panel.TFrame")
+            right.pack(side="left", fill="x", expand=True, padx=(6, 0))
+            self._entry_row(left, left_key, left_label)
+            self._entry_row(right, right_key, right_label)
+
+        paired("meta_episode", "Díl", "meta_dance", "Tanec")
+        self._entry_row(tab, "meta_artist", "Interpret", padx=12)
+        self._entry_row(tab, "meta_performer", "Účinkující", padx=12)
+        paired("duration", "Délka · HH:MM:SS:FF", "bpm", "Tempo BPM")
+        ttk.Label(tab, text="BPM, takt a první doba vyžadují poslechovou kontrolu.", wraplength=365, style="Warning.TLabel").pack(fill="x", padx=12, pady=(7, 5))
+        ttk.Label(tab, text="Audio se zpracovává lokálně. YAMNet model se stáhne až při spuštění analýzy.", wraplength=365, style="Info.TLabel").pack(fill="x", padx=12, pady=(2, 9))
 
     def _build_music_tab(self) -> None:
-        tab = ttk.Frame(self.notebook)
+        tab = ttk.Frame(self.notebook, style="Panel.TFrame")
         self.notebook.add(tab, text="Hudební mapa")
         cue_text = self._text_panel(tab, "cues", "Kandidátní akcenty — synchronizováno s editovatelnou tabulkou značek", 12)
         cue_text.configure(state="disabled")
         self._text_panel(tab, "sections", "Energetická okna (10 s), nikoli ověřené hudební fráze", 10)
-        ttk.Label(tab, text="Časové značky se tisknou v HH:MM:SS:FF při 25 fps.", foreground="#5F7078").pack(anchor="w", padx=10, pady=5)
+        ttk.Label(tab, text="Časové značky se tisknou v HH:MM:SS:FF při 25 fps.", style="Muted.TLabel").pack(anchor="w", padx=10, pady=5)
 
     def _build_production_tab(self) -> None:
-        tab = ttk.Frame(self.notebook)
+        tab = ttk.Frame(self.notebook, style="Panel.TFrame")
         self.notebook.add(tab, text="Produkce")
-        ttk.Label(tab, text="Zapište nebo vložte poznámky z produkčního zdroje. Text se tiskne samostatně od návrhů LD.", wraplength=440, justify="left").pack(fill="x", padx=9, pady=8)
-        canvas = tk.Canvas(tab, highlightthickness=0)
+        ttk.Label(tab, text="PODLE PODKLADŮ", style="Eyebrow.TLabel").pack(anchor="w", padx=12, pady=(10, 1))
+        ttk.Label(tab, text="Zapište produkční zdroj. Tyto informace se tisknou samostatně od návrhů LD.", wraplength=360, justify="left", style="Muted.TLabel").pack(fill="x", padx=12, pady=(2, 8))
+        canvas = tk.Canvas(tab, highlightthickness=0, background=self.ui["panel"], borderwidth=0)
         scrollbar = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
+        inner = ttk.Frame(canvas, style="Panel.TFrame")
         inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw", width=435)
+        inner_window = canvas.create_window((0, 0), window=inner, anchor="nw", width=360)
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(inner_window, width=event.width))
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -1018,16 +1185,18 @@ class SongSheetApp:
             self._text_panel(inner, f"prod_{key}", label, 4)
 
     def _build_ld_tab(self) -> None:
-        tab = ttk.Frame(self.notebook)
+        tab = ttk.Frame(self.notebook, style="Panel.TFrame")
         self.notebook.add(tab, text="Návrhy LD")
-        ttk.Label(tab, text="Vlastní doporučení asistenta / LD. Tato část je v PDF barevně oddělena od produkčního zadání.", wraplength=440, justify="left").pack(fill="x", padx=9, pady=8)
+        ttk.Label(tab, text="SAMOSTATNÁ ČÁST", style="Eyebrow.TLabel").pack(anchor="w", padx=12, pady=(10, 1))
+        ttk.Label(tab, text="Návrhy, přechody a body k ověření na zkoušce. V PDF jsou barevně odděleny od produkčního zadání.", wraplength=360, justify="left", style="Muted.TLabel").pack(fill="x", padx=12, pady=(2, 8))
         self._text_panel(tab, "ld_proposals", "Návrhy, přechody a body k ověření na zkoušce", 20)
 
     def _build_layout_tab(self) -> None:
-        tab = ttk.Frame(self.notebook)
+        tab = ttk.Frame(self.notebook, style="Panel.TFrame")
         self.notebook.add(tab, text="Vzhled")
         self.accent_label = tk.StringVar(value="Tyrkysová")
-        ttk.Label(tab, text="Barva zvýraznění").pack(anchor="w", padx=12, pady=(16, 4))
+        ttk.Label(tab, text="VZHLED STRÁNKY", style="Eyebrow.TLabel").pack(anchor="w", padx=12, pady=(12, 8))
+        ttk.Label(tab, text="Barva zvýraznění", style="Field.TLabel").pack(anchor="w", padx=12, pady=(6, 4))
         self.accent_combo = ttk.Combobox(tab, textvariable=self.accent_label, state="readonly", values=["Tyrkysová", "Modrá", "Fialová", "Červená", "Zlatá"])
         self.accent_combo.pack(fill="x", padx=12)
         self.accent_combo.bind("<<ComboboxSelected>>", self.change_accent)
@@ -1038,8 +1207,8 @@ class SongSheetApp:
         self.refs_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(tab, text="Zobrazit vizuální reference", variable=self.refs_var, command=self.schedule_preview).pack(anchor="w", padx=12, pady=3)
         ttk.Button(tab, text="Vlastní barva…", command=self.pick_color).pack(anchor="w", padx=12, pady=10)
-        ttk.Button(tab, text="Odebrat poslední referenci", command=self.remove_reference).pack(anchor="w", padx=12, pady=2)
-        ttk.Label(tab, text="Náhled se obnoví automaticky. Export používá stránku A4 na šířku.", wraplength=430, justify="left").pack(fill="x", padx=12, pady=10)
+        ttk.Button(tab, text="Odebrat poslední referenci", command=self.remove_reference, style="Quiet.TButton").pack(anchor="w", padx=12, pady=2)
+        ttk.Label(tab, text="Úpravy se ihned promítají do náhledu a exportu A4 na šířku.", wraplength=365, justify="left", style="Muted.TLabel").pack(fill="x", padx=12, pady=10)
 
     def change_accent(self, _event: Any = None) -> None:
         colors = {"Tyrkysová": "#16A9A0", "Modrá": "#3A78C2", "Fialová": "#8056B3", "Červená": "#C74645", "Zlatá": "#C48A21"}
@@ -1469,7 +1638,7 @@ class SongSheetApp:
                 lower.extend((x, center + amp))
             canvas.create_polygon(*(upper + list(reversed(lower))), fill="#23B8AA", outline="")
         else:
-            canvas.create_text((left + right) // 2, center, text="Po načtení audia se zde zobrazí waveform", fill="#A6B4BB", font=("TkDefaultFont", 12))
+            canvas.create_text((left + right) // 2, center, text="Po načtení audia se zde zobrazí waveform", fill="#A6B4BB", font=self._font(12))
 
         if duration > 0:
             tick_count = min(12, max(4, int(duration / 10) + 1))
@@ -1477,7 +1646,7 @@ class SongSheetApp:
                 x = left + int((right - left) * i / tick_count)
                 second = duration * i / tick_count
                 canvas.create_line(x, bottom + 1, x, bottom + 8, fill="#91A1A8")
-                canvas.create_text(x, bottom + 22, text=tc25(second), fill="#A6B4BB", font=("TkDefaultFont", 8))
+                canvas.create_text(x, bottom + 22, text=tc25(second), fill="#A6B4BB", font=self._font(8))
 
         self.marker_canvas_items: dict[str, tuple[int, int]] = {}
         marker_colors = {"Akcent": "#F0B94B", "Cue": "#E26D5A", "Sekce": "#7EA6F8", "Nástroj": "#C38CE4", "Jiné": "#C38CE4"}
@@ -1489,10 +1658,10 @@ class SongSheetApp:
             color = marker_colors.get(marker.get("kind", "Cue"), "#F0B94B")
             line = canvas.create_line(x, top, x, bottom, fill=color, width=3 if marker.get("id") == self.selected_marker_id else 2)
             text = canvas.create_text(min(right - 5, max(left + 5, x + 5)), top + 10 + (i % 4) * 17,
-                                      text=str(marker.get("label", "Značka"))[:24], anchor="nw", fill=color, font=("TkDefaultFont", 8, "bold"))
+                                      text=str(marker.get("label", "Značka"))[:24], anchor="nw", fill=color, font=self._font(8, True))
             self.marker_canvas_items[str(marker.get("id"))] = (line, text)
         self.playhead_item = canvas.create_line(left, top, left, bottom, fill="#FF5D6C", width=2)
-        self.playhead_label_item = canvas.create_text(left + 4, bottom - 4, text=tc25(self.current_position), anchor="sw", fill="#FF8791", font=("TkDefaultFont", 8, "bold"))
+        self.playhead_label_item = canvas.create_text(left + 4, bottom - 4, text=tc25(self.current_position), anchor="sw", fill="#FF8791", font=self._font(8, True))
         self.draw_instrument_timeline()
         self._move_playhead()
 
@@ -1534,14 +1703,14 @@ class SongSheetApp:
         duration = self.duration_seconds()
         if not rows:
             message = "Spusťte analýzu YAMNet/AudioSet pro zobrazení nástrojů v čase." if not activity.get("rows") else "Pro vybraný filtr nejsou časová skóre."
-            canvas.create_text(width // 2, height // 2, text=message, fill="#91A2A8", font=("TkDefaultFont", 10))
+            canvas.create_text(width // 2, height // 2, text=message, fill="#91A2A8", font=self._font(10))
             return
         palette = ["#2BB8AD", "#82AAF1", "#F0BD5A", "#C58CE6", "#EF7F78", "#73C68B", "#62BDE2", "#D39568"]
         plot_width = max(1, right - left)
         for row_index, row in enumerate(rows):
             y = top + row_index * row_height
             instrument = str(row.get("instrument", ""))
-            canvas.create_text(left - 8, y + row_height // 2, text=instrument, anchor="e", fill="#A8B7BC", font=("TkDefaultFont", 8))
+            canvas.create_text(left - 8, y + row_height // 2, text=instrument, anchor="e", fill="#A8B7BC", font=self._font(8))
             canvas.create_rectangle(left, y + 2, right, y + row_height - 2, fill="#17242A", outline="")
             values = row.get("values", []) or []
             if not values:
@@ -1565,8 +1734,8 @@ class SongSheetApp:
             for index in range(7):
                 x = left + int(plot_width * index / 6)
                 canvas.create_line(x, top, x, plot_bottom, fill="#34464D")
-                canvas.create_text(x, plot_bottom + 14, text=tc25(duration * index / 6), fill="#91A2A8", font=("TkDefaultFont", 7))
-        canvas.create_text(left, 9, text="YAMNet / AudioSet · skóre aktivity, ne pravděpodobnost", anchor="w", fill="#91A2A8", font=("TkDefaultFont", 8))
+                canvas.create_text(x, plot_bottom + 14, text=tc25(duration * index / 6), fill="#91A2A8", font=self._font(7))
+        canvas.create_text(left, 9, text="YAMNet / AudioSet · skóre aktivity, ne pravděpodobnost", anchor="w", fill="#91A2A8", font=self._font(8))
         self.instrument_playhead_item = canvas.create_line(left, top, left, plot_bottom, fill="#FF6572", width=2)
         self._move_instrument_playhead()
 
